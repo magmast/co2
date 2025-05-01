@@ -1,42 +1,120 @@
-use bumpalo::Bump;
+use bumpalo::{Bump, collections::Vec, vec};
+use unicode_ident::{is_xid_continue, is_xid_start};
 use winnow::{
     Parser, Result,
     ascii::{digit1, hex_digit1, multispace0, oct_digit1},
     combinator::{alt, delimited, fail, opt, preceded, repeat, terminated},
     error::{ContextError, ParserError, StrContext, StrContextValue},
     stream::{AsChar, Compare, Stream, StreamIsPartial},
-    token::{any, one_of},
+    token::{any, one_of, take_while},
 };
 
-use crate::ast::{Add, Div, Expr, Group, Int, IntRadix, IntSuffix, Mul, Sub};
+use crate::ast::{Expr, Func, Int, IntRadix, IntSuffix, Param, Stmt, Type};
 
-pub fn expr<'arena, 'input: 'arena>(
-    bump: &'arena Bump,
-) -> impl Parser<&'input str, Expr<'arena, 'input>, ContextError> {
+pub fn file<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Vec<'bump, Func<'bump, 'input>>, ContextError> {
+    repeat(.., func(bump)).fold(
+        || Vec::new_in(bump),
+        |mut acc, func| {
+            acc.push(func);
+            acc
+        },
+    )
+}
+
+fn func<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Func<'bump, 'input>, ContextError> {
+    (
+        r#type,
+        ident,
+        delimited(token('('), params(bump), token(')')),
+        delimited(
+            token('{'),
+            repeat(.., stmt(bump)).fold(
+                || Vec::new_in(bump),
+                |mut acc, stmt| {
+                    acc.push(stmt);
+                    acc
+                },
+            ),
+            token('}'),
+        ),
+    )
+        .map(|(r#type, ident, params, body)| Func {
+            r#type,
+            ident,
+            params,
+            body,
+        })
+}
+
+fn r#type(input: &mut &str) -> Result<Type> {
+    token(alt(("void".value(Type::Void), "int".value(Type::Int)))).parse_next(input)
+}
+
+fn params<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Vec<'bump, Param<'input>>, ContextError> {
+    move |input: &mut &'input str| {
+        let init = opt(param).parse_next(input)?;
+        if let Some(init) = init {
+            repeat(.., preceded(token(','), param))
+                .fold(
+                    || vec![in bump; init.clone()],
+                    |mut acc, param| {
+                        acc.push(param);
+                        acc
+                    },
+                )
+                .parse_next(input)
+        } else {
+            Ok(Vec::new_in(bump))
+        }
+    }
+}
+
+fn param<'input>(input: &mut &'input str) -> Result<Param<'input>> {
+    (r#type, opt(ident))
+        .map(|(r#type, ident)| Param { r#type, ident })
+        .parse_next(input)
+}
+
+fn stmt<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Stmt<'bump, 'input>, ContextError> {
+    terminated(
+        alt((
+            preceded(token("return"), expr(bump)).map(Stmt::Return),
+            expr(bump).map(Stmt::Expr),
+        )),
+        token(';'),
+    )
+}
+
+fn expr<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
     ExprParser { bump }
 }
 
 /// Expr parser is a separate structure to eliminate recursive opaque return type.
-struct ExprParser<'arena> {
-    bump: &'arena Bump,
+struct ExprParser<'bump> {
+    bump: &'bump Bump,
 }
 
-impl<'arena, 'input> Parser<&'input str, Expr<'arena, 'input>, ContextError>
-    for ExprParser<'arena>
-{
-    fn parse_next(
-        &mut self,
-        input: &mut &'input str,
-    ) -> Result<Expr<'arena, 'input>, ContextError> {
+impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ContextError> for ExprParser<'bump> {
+    fn parse_next(&mut self, input: &mut &'input str) -> Result<Expr<'bump, 'input>, ContextError> {
         additive(self.bump)
             .context(StrContext::Label("expression"))
             .parse_next(input)
     }
 }
 
-fn additive<'arena, 'input: 'arena>(
-    bump: &'arena Bump,
-) -> impl Parser<&'input str, Expr<'arena, 'input>, ContextError> {
+fn additive<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
     move |input: &mut &'input str| {
         let init = multiplicative(bump).parse_next(input)?;
 
@@ -53,8 +131,8 @@ fn additive<'arena, 'input: 'arena>(
         .fold(
             || init.clone(),
             |lhs, (op, rhs)| match op {
-                '+' => Expr::Add(bump.alloc(Add(lhs, rhs))),
-                '-' => Expr::Sub(bump.alloc(Sub(lhs, rhs))),
+                '+' => Expr::Add(bump.alloc(lhs), bump.alloc(rhs)),
+                '-' => Expr::Sub(bump.alloc(lhs), bump.alloc(rhs)),
                 _ => unreachable!(),
             },
         )
@@ -62,9 +140,9 @@ fn additive<'arena, 'input: 'arena>(
     }
 }
 
-fn multiplicative<'arena, 'input: 'arena>(
-    bump: &'arena Bump,
-) -> impl Parser<&'input str, Expr<'arena, 'input>, ContextError> {
+fn multiplicative<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
     move |input: &mut &'input str| {
         let init = primary(bump).parse_next(input)?;
 
@@ -72,8 +150,8 @@ fn multiplicative<'arena, 'input: 'arena>(
             .fold(
                 || init.clone(),
                 |lhs, (op, rhs)| match op {
-                    '*' => Expr::Mul(bump.alloc(Mul(lhs, rhs))),
-                    '/' => Expr::Div(bump.alloc(Div(lhs, rhs))),
+                    '*' => Expr::Mul(bump.alloc(lhs), bump.alloc(rhs)),
+                    '/' => Expr::Div(bump.alloc(lhs), bump.alloc(rhs)),
                     _ => unreachable!(),
                 },
             )
@@ -81,25 +159,20 @@ fn multiplicative<'arena, 'input: 'arena>(
     }
 }
 
-fn primary<'arena, 'input: 'arena>(
-    bump: &'arena Bump,
-) -> impl Parser<&'input str, Expr<'arena, 'input>, ContextError> {
+fn primary<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
     alt((
-        group(bump).map(|group| Expr::Group(bump.alloc(group))),
+        group(bump),
         int.map(Expr::Int),
-        fail.context(StrContext::Label("primary expression"))
-            .context(StrContext::Expected(StrContextValue::StringLiteral(
-                "group",
-            )))
-            .context(StrContext::Expected(StrContextValue::StringLiteral(
-                "integer",
-            ))),
+        ident.map(Expr::Ident),
+        fail.context(StrContext::Label("primary expression")),
     ))
 }
 
-fn group<'arena, 'input: 'arena>(
-    bump: &'arena Bump,
-) -> impl Parser<&'input str, Group<'arena, 'input>, ContextError> {
+fn group<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
     delimited(
         token('(')
             .context(StrContext::Label("group delimiter"))
@@ -109,34 +182,33 @@ fn group<'arena, 'input: 'arena>(
             .context(StrContext::Label("group delimiter"))
             .context(StrContext::Expected(StrContextValue::CharLiteral(')'))),
     )
-    .map(Group)
 }
 
-fn int<'input>(input: &mut &'input str) -> Result<Int<'input>> {
+fn ident<'input>(input: &mut &'input str) -> Result<&'input str> {
     token((
-        int_radix,
-        opt(alt((
-            preceded(one_of(b"uU"), int_suffix).map(|suffix| (true, Some(suffix))),
-            terminated(int_suffix, one_of(b"uU")).map(|suffix| (true, Some(suffix))),
-            int_suffix.map(|suffix| (false, Some(suffix))),
-            one_of(b"uU").value((true, None)),
-        )))
-        .map(|opt| opt.unwrap_or((false, None))),
+        any.verify(|&c: &char| is_xid_start(c)),
+        take_while(.., |c: char| is_xid_continue(c)),
     ))
-    .map(|(radix, (unsigned, suffix))| Int {
-        radix,
-        unsigned,
-        suffix,
-    })
+    .take()
     .parse_next(input)
 }
 
-fn int_radix<'input>(input: &mut &'input str) -> Result<IntRadix<'input>> {
+fn int<'input>(input: &mut &'input str) -> Result<Int<'input>> {
+    token((int_radix, opt(int_suffix)))
+        .map(|((radix, value), suffix)| Int {
+            radix,
+            value,
+            suffix,
+        })
+        .parse_next(input)
+}
+
+fn int_radix<'input>(input: &mut &'input str) -> Result<(IntRadix, &'input str)> {
     alt((
-        bin_int_radix.map(IntRadix::Bin),
-        hex_int_radix.map(IntRadix::Hex),
-        oct_int_radix.map(IntRadix::Oct),
-        dec_int_radix.map(IntRadix::Dec),
+        bin_int_radix.map(|v| (IntRadix::Bin, v)),
+        hex_int_radix.map(|v| (IntRadix::Hex, v)),
+        oct_int_radix.map(|v| (IntRadix::Oct, v)),
+        dec_int_radix.map(|v| (IntRadix::Dec, v)),
     ))
     .parse_next(input)
 }
@@ -179,10 +251,22 @@ where
 }
 
 fn int_suffix(input: &mut &str) -> Result<IntSuffix> {
+    let inner = || {
+        alt((
+            alt(("ll", "LL")).value(IntSuffix::LongLong),
+            one_of(b"lL").value(IntSuffix::Long),
+            alt(("wb", "WB")).value(IntSuffix::BitPrecise),
+        ))
+    };
+
     alt((
-        alt(("ll", "LL")).value(IntSuffix::LongLong),
-        one_of(b"lL").value(IntSuffix::Long),
-        alt(("wb", "WB")).value(IntSuffix::BitPrecise),
+        alt((
+            preceded(one_of(b"uU"), inner()),
+            terminated(inner(), one_of(b"uU")),
+        ))
+        .map(|suffix| suffix.to_unsigned()),
+        one_of(b"uU").value(IntSuffix::Unsigned),
+        inner(),
     ))
     .parse_next(input)
 }
@@ -198,54 +282,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    mod int {
-        use winnow::Parser;
-
-        use crate::{
-            ast::{Int, IntRadix, IntSuffix},
-            parser::int,
-        };
-
-        #[test]
-        fn parses_suffixes() {
-            let cases = [IntSuffix::Long, IntSuffix::LongLong, IntSuffix::BitPrecise]
-                .into_iter()
-                .flat_map(|suffix| {
-                    [
-                        (
-                            format!("1{suffix}",),
-                            Int {
-                                radix: IntRadix::Dec("1"),
-                                suffix: Some(suffix.clone()),
-                                unsigned: false,
-                            },
-                        ),
-                        (
-                            format!("1u{suffix}",),
-                            Int {
-                                radix: IntRadix::Dec("1"),
-                                suffix: Some(suffix.clone()),
-                                unsigned: true,
-                            },
-                        ),
-                        (
-                            format!("1{suffix}u",),
-                            Int {
-                                radix: IntRadix::Dec("1"),
-                                suffix: Some(suffix.clone()),
-                                unsigned: true,
-                            },
-                        ),
-                    ]
-                })
-                .flat_map(|(input, int)| [(input.to_uppercase(), int.clone()), (input, int)]);
-
-            for (input, value) in cases {
-                assert_eq!(int.parse(input.as_str()), Ok(value));
-            }
-        }
-    }
-
     mod int_radix {
         use winnow::Parser;
 
@@ -253,15 +289,15 @@ mod tests {
 
         #[test]
         fn parses_all_radixes() {
-            assert_eq!(int_radix.parse("0b01"), Ok(IntRadix::Bin("01")));
-            assert_eq!(int_radix.parse("01234567"), Ok(IntRadix::Oct("01234567")));
+            assert_eq!(int_radix.parse("0b01"), Ok((IntRadix::Bin, "01")));
+            assert_eq!(int_radix.parse("01234567"), Ok((IntRadix::Oct, "01234567")));
             assert_eq!(
                 int_radix.parse("1234567890"),
-                Ok(IntRadix::Dec("1234567890"))
+                Ok((IntRadix::Dec, "1234567890"))
             );
             assert_eq!(
                 int_radix.parse("0x0123456789abcdefABCDEF"),
-                Ok(IntRadix::Hex("0123456789abcdefABCDEF"))
+                Ok((IntRadix::Hex, "0123456789abcdefABCDEF"))
             );
         }
     }

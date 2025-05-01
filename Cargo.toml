@@ -5,5 +5,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
-bumpalo = { version = "3.17.0", features = ["boxed"] }
+bumpalo = { version = "3.17.0", features = ["boxed", "collections"] }
+unicode-ident = "1.0.18"
 winnow = "0.7.7"

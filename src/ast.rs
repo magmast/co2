@@ -1,68 +1,96 @@
 use std::fmt::{self, Display, Formatter};
 
+use bumpalo::collections::Vec;
+
 #[derive(Debug, PartialEq, Clone)]
-pub enum Expr<'arena, 'input> {
+pub struct Func<'bump, 'input> {
+    pub r#type: Type,
+    pub ident: &'input str,
+    pub params: Vec<'bump, Param<'input>>,
+    pub body: Vec<'bump, Stmt<'bump, 'input>>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Type {
+    Void,
+    Int,
+}
+
+impl Display for Type {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Void => write!(f, "void"),
+            Type::Int => write!(f, "int"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Param<'input> {
+    pub r#type: Type,
+    pub ident: Option<&'input str>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Stmt<'bump, 'input> {
+    Expr(Expr<'bump, 'input>),
+    Return(Expr<'bump, 'input>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Expr<'bump, 'input> {
+    Ident(&'input str),
     Int(Int<'input>),
-    Group(&'arena Group<'arena, 'input>),
-    Add(&'arena Add<'arena, 'input>),
-    Sub(&'arena Sub<'arena, 'input>),
-    Mul(&'arena Mul<'arena, 'input>),
-    Div(&'arena Div<'arena, 'input>),
+    Add(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Sub(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Mul(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Div(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Int<'input> {
-    pub radix: IntRadix<'input>,
-    pub unsigned: bool,
+    pub radix: IntRadix,
+    pub value: &'input str,
     pub suffix: Option<IntSuffix>,
 }
 
-impl<'input> From<IntRadix<'input>> for Int<'input> {
-    fn from(value: IntRadix<'input>) -> Self {
-        Self {
-            radix: value,
-            unsigned: false,
-            suffix: None,
-        }
-    }
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum IntRadix {
+    Bin,
+    Oct,
+    Dec,
+    Hex,
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum IntRadix<'input> {
-    Bin(&'input str),
-    Oct(&'input str),
-    Dec(&'input str),
-    Hex(&'input str),
+impl From<IntRadix> for u32 {
+    fn from(val: IntRadix) -> Self {
+        match val {
+            IntRadix::Bin => 2,
+            IntRadix::Oct => 8,
+            IntRadix::Dec => 10,
+            IntRadix::Hex => 16,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum IntSuffix {
+    Unsigned,
     BitPrecise,
+    UnsignedBitPrecise,
     Long,
+    UnsignedLong,
     LongLong,
+    UnsignedLongLong,
 }
 
-impl Display for IntSuffix {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+impl IntSuffix {
+    pub fn to_unsigned(&self) -> Self {
         match self {
-            Self::BitPrecise => write!(f, "wb"),
-            Self::Long => write!(f, "l"),
-            Self::LongLong => write!(f, "ll"),
+            Self::BitPrecise => Self::UnsignedBitPrecise,
+            Self::Long => Self::UnsignedLong,
+            Self::LongLong => Self::UnsignedLongLong,
+            _ => self.clone(),
         }
     }
 }
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Group<'arena, 'input>(pub Expr<'arena, 'input>);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Add<'arena, 'input>(pub Expr<'arena, 'input>, pub Expr<'arena, 'input>);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Sub<'arena, 'input>(pub Expr<'arena, 'input>, pub Expr<'arena, 'input>);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Mul<'arena, 'input>(pub Expr<'arena, 'input>, pub Expr<'arena, 'input>);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Div<'arena, 'input>(pub Expr<'arena, 'input>, pub Expr<'arena, 'input>);
