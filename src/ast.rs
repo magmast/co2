@@ -4,7 +4,7 @@ use bumpalo::collections::Vec;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Func<'bump, 'input> {
-    pub r#type: Type,
+    pub ty: Type,
     pub ident: &'input str,
     pub params: Vec<'bump, Param<'input>>,
     pub body: Vec<'bump, Stmt<'bump, 'input>>,
@@ -27,14 +27,22 @@ impl Display for Type {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Param<'input> {
-    pub r#type: Type,
+    pub ty: Type,
     pub ident: Option<&'input str>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Stmt<'bump, 'input> {
+    Decl(Decl<'bump, 'input>),
     Expr(Expr<'bump, 'input>),
     Return(Expr<'bump, 'input>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Decl<'bump, 'input> {
+    pub ty: Type,
+    pub ident: &'input str,
+    pub init: Option<Expr<'bump, 'input>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -55,6 +63,10 @@ pub struct Int<'input> {
 }
 
 impl Int<'_> {
+    pub fn to_i32(&self) -> i32 {
+        i32::from_str_radix(self.value, self.radix.into()).unwrap()
+    }
+
     pub fn to_u64(&self) -> u64 {
         u64::from_str_radix(self.value, self.radix.into()).unwrap()
     }

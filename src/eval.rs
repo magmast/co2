@@ -28,7 +28,7 @@ impl Interpreter {
 struct Scope<'bump, 'ast, 'input> {
     bump: &'bump Bump,
     parent: Option<&'bump Scope<'bump, 'ast, 'input>>,
-    defs: RefCell<HashMap<&'input str, &'bump Value<'ast, 'input>>>,
+    defs: RefCell<HashMap<&'input str, Option<&'bump Value<'ast, 'input>>>>,
 }
 
 impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
@@ -47,14 +47,13 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
         for func in funcs {
             self.defs
                 .borrow_mut()
-                .insert(func.ident, self.bump.alloc(Value::Func(func)));
+                .insert(func.ident, Some(self.bump.alloc(Value::Func(func))));
         }
 
-        let main = self.get("main");
-        match main {
-            Some(Value::Func(main)) => self.eval_main(main),
-            Some(_) => Err(anyhow!("Main is not a function")),
-            None => Err(anyhow!("No main function")),
+        if let Value::Func(main) = self.get("main")? {
+            self.eval_main(main)
+        } else {
+            Err(anyhow!("Main is not a function"))
         }
     }
 
@@ -65,7 +64,7 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
         if !func.params.is_empty()
             && func.params
                 != [Param {
-                    r#type: Type::Void,
+                    ty: Type::Void,
                     ident: None,
                 }]
         {
@@ -74,6 +73,7 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
 
         let child = self.fork();
         for stmt in &func.body {
+            println!("Eval: {stmt:#?}");
             if let Some(ret) = child.eval_stmt(stmt)? {
                 return Ok(ret);
             }
@@ -91,6 +91,16 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
                 Ok(None)
             }
             Stmt::Return(expr) => Ok(Some(self.eval_expr(expr)?)),
+            Stmt::Decl(decl) => {
+                if let Some(init) = &decl.init {
+                    self.defs
+                        .borrow_mut()
+                        .insert(decl.ident, Some(self.eval_expr(init)?));
+                } else {
+                    self.defs.borrow_mut().insert(decl.ident, None);
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -100,7 +110,8 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
                 .defs
                 .borrow()
                 .get(*ident)
-                .with_context(|| format!("{ident} is not defined"))?),
+                .with_context(|| format!("{ident} is not defined"))?
+                .with_context(|| format!("{ident} is not initialized"))?),
             Expr::Int(int) => Ok(self.bump.alloc(Value::Number(i64::from_str_radix(
                 int.value,
                 int.radix.into(),
@@ -128,12 +139,14 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
         })
     }
 
-    fn get(&'bump self, ident: &'input str) -> Option<&'bump Value<'ast, 'input>> {
-        self.defs
-            .borrow()
-            .get(ident)
-            .copied()
-            .or_else(|| self.parent.and_then(|parent| parent.get(ident)))
+    fn get(&'bump self, ident: &'input str) -> Result<&'bump Value<'ast, 'input>> {
+        if let Some(v) = self.defs.borrow().get(ident).copied() {
+            v.with_context(|| format!("{ident} is not initialized"))
+        } else {
+            self.parent
+                .with_context(|| format!("{ident} is not defined"))
+                .and_then(|parent| parent.get(ident))
+        }
     }
 }
 
@@ -149,7 +162,7 @@ impl<'ast, 'input> Add for &Value<'ast, 'input> {
     fn add(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (Value::Number(lhs), Value::Number(rhs)) => Ok(Value::Number(lhs + rhs)),
-            _ => Err(anyhow!("Cannot add functions")),
+            _ => Err(anyhow!("Only number addition is allowed")),
         }
     }
 }
@@ -160,7 +173,7 @@ impl<'ast, 'input> Sub for &Value<'ast, 'input> {
     fn sub(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (Value::Number(lhs), Value::Number(rhs)) => Ok(Value::Number(lhs - rhs)),
-            _ => Err(anyhow!("Cannot sub functions")),
+            _ => Err(anyhow!("Only number subtraction is allowed")),
         }
     }
 }
@@ -171,7 +184,7 @@ impl<'ast, 'input> Mul for &Value<'ast, 'input> {
     fn mul(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (Value::Number(lhs), Value::Number(rhs)) => Ok(Value::Number(lhs * rhs)),
-            _ => Err(anyhow!("Cannot mul functions")),
+            _ => Err(anyhow!("Only number multiplication is allowed")),
         }
     }
 }
@@ -182,7 +195,7 @@ impl<'ast, 'input> Div for &Value<'ast, 'input> {
     fn div(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (Value::Number(lhs), Value::Number(rhs)) => Ok(Value::Number(lhs / rhs)),
-            _ => Err(anyhow!("Cannot div functions")),
+            _ => Err(anyhow!("Only number division is allowed")),
         }
     }
 }
@@ -192,13 +205,13 @@ impl Display for Value<'_, '_> {
         match self {
             Self::Number(v) => write!(f, "{v}"),
             Self::Func(v) => {
-                write!(f, "{} {}(", v.r#type, v.ident)?;
+                write!(f, "{} {}(", v.ty, v.ident)?;
                 let mut param_wrote = false;
                 for param in &v.params {
                     if param_wrote {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", param.r#type)?;
+                    write!(f, "{}", param.ty)?;
                     if let Some(ident) = param.ident {
                         write!(f, " {}", ident)?;
                     }

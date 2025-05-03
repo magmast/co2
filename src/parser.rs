@@ -9,7 +9,7 @@ use winnow::{
     token::{any, one_of, take_while},
 };
 
-use crate::ast::{Expr, Func, Int, IntRadix, IntSuffix, Param, Stmt, Type};
+use crate::ast::{Decl, Expr, Func, Int, IntRadix, IntSuffix, Param, Stmt, Type};
 
 pub fn file<'bump, 'input: 'bump>(
     bump: &'bump Bump,
@@ -27,7 +27,7 @@ fn func<'bump, 'input: 'bump>(
     bump: &'bump Bump,
 ) -> impl Parser<&'input str, Func<'bump, 'input>, ContextError> {
     (
-        r#type,
+        ty,
         ident,
         delimited(token('('), params(bump), token(')')),
         delimited(
@@ -43,14 +43,14 @@ fn func<'bump, 'input: 'bump>(
         ),
     )
         .map(|(r#type, ident, params, body)| Func {
-            r#type,
+            ty: r#type,
             ident,
             params,
             body,
         })
 }
 
-fn r#type(input: &mut &str) -> Result<Type> {
+fn ty(input: &mut &str) -> Result<Type> {
     token(alt(("void".value(Type::Void), "int".value(Type::Int)))).parse_next(input)
 }
 
@@ -76,8 +76,8 @@ fn params<'bump, 'input: 'bump>(
 }
 
 fn param<'input>(input: &mut &'input str) -> Result<Param<'input>> {
-    (r#type, opt(ident))
-        .map(|(r#type, ident)| Param { r#type, ident })
+    (ty, opt(ident))
+        .map(|(r#type, ident)| Param { ty: r#type, ident })
         .parse_next(input)
 }
 
@@ -87,10 +87,21 @@ fn stmt<'bump, 'input: 'bump>(
     terminated(
         alt((
             preceded(token("return"), expr(bump)).map(Stmt::Return),
+            decl(bump).map(Stmt::Decl),
             expr(bump).map(Stmt::Expr),
         )),
         token(';'),
     )
+}
+
+fn decl<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Decl<'bump, 'input>, ContextError> {
+    (ty, ident, opt(preceded(token('='), expr(bump)))).map(|(ty, ident, init)| Decl {
+        ty,
+        ident,
+        init,
+    })
 }
 
 fn expr<'bump, 'input: 'bump>(
@@ -185,11 +196,13 @@ fn group<'bump, 'input: 'bump>(
 }
 
 fn ident<'input>(input: &mut &'input str) -> Result<&'input str> {
-    token((
-        any.verify(|&c: &char| is_xid_start(c)),
-        take_while(.., |c: char| is_xid_continue(c)),
-    ))
-    .take()
+    token(
+        (
+            any.verify(|&c: &char| is_xid_start(c)),
+            take_while(.., |c: char| is_xid_continue(c)),
+        )
+            .take(),
+    )
     .parse_next(input)
 }
 

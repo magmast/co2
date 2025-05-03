@@ -1,10 +1,10 @@
 use core::str;
-use std::{fs::File, io::BufWriter};
+use std::{fs::File, io::BufWriter, os::unix::fs::PermissionsExt};
 
 use anyhow::{Context, Result, anyhow};
 use bumpalo::Bump;
 use co2::{
-    Writable,
+    comp::Compiler,
     elf::{Elf, Segment, SegmentFlags},
     parser,
 };
@@ -12,13 +12,16 @@ use winnow::Parser;
 
 const CODE: &str = "
 int main() {
-    4 * 8;
-    return (2 + 2) * 2;
+    int a = 9;
+    int b = 4;
+    return a / b;
 }
 ";
 
 fn main() -> Result<()> {
-    let instructions = {
+    let mut code = vec![];
+
+    {
         let bump = Bump::new();
 
         let func = parser::file(&bump)
@@ -29,24 +32,24 @@ fn main() -> Result<()> {
             .next()
             .context("No functions are defined")?;
 
-        let mut instructions = Vec::new();
-        co2::compile(&func, &mut instructions);
-
-        instructions
+        Compiler::from(&mut code)
+            .compile(&func)
+            .context("Compilation failed")?;
     };
 
     let elf = Elf::builder()
         .segments(vec![
             Segment::builder()
                 .flags(SegmentFlags::READ | SegmentFlags::EXEC)
-                .data(&instructions)
+                .data(&code)
                 .entry(true)
                 .build()?,
         ])
         .build()?;
 
-    let mut f =
-        BufWriter::new(File::create("a.out").context("Failed to create file for the program")?);
+    let f = File::create("a.out").context("Failed to create file for the program")?;
+    f.metadata()?.permissions().set_mode(0o755);
+    let mut f = BufWriter::new(f);
     elf.write(&mut f)?;
 
     Ok(())

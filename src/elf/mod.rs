@@ -10,8 +10,6 @@ use bytemuck::Zeroable;
 use itertools::Itertools;
 use raw::{Header, Ident, ProgramHeader, SectionFlags, SectionHeader};
 
-use crate::Writable;
-
 pub mod raw;
 
 pub const MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -108,65 +106,7 @@ impl<'data> Elf<'data> {
         }
     }
 
-    fn alloc_segments(&self) -> Vec<(&Segment<'data>, ProgramHeader)> {
-        self.segments
-            .iter()
-            .scan(
-                (
-                    (mem::size_of::<Header>()
-                        + mem::size_of::<ProgramHeader>() * self.segments.len())
-                        as u64,
-                    0x0040_0000,
-                    0x0040_0000,
-                ),
-                |(pfend, pvoff, ppoff), s| {
-                    let filesz = s.data.byte_len() as u64;
-                    let memsz = s.mem_size.unwrap_or(filesz);
-
-                    let offset = align_up(*pfend, s.alignment);
-                    *pfend = offset + filesz;
-
-                    let vaddr = s
-                        .virtual_address
-                        .unwrap_or_else(|| align_up(*pvoff, s.alignment));
-                    *pvoff = vaddr + memsz;
-
-                    let paddr = s
-                        .physical_address
-                        .unwrap_or_else(|| align_up(*ppoff, s.alignment));
-                    *ppoff = paddr + memsz;
-
-                    Some((
-                        s,
-                        ProgramHeader {
-                            p_type: s.ty.into(),
-                            p_flags: s.flags.bits(),
-                            p_offset: offset,
-                            p_vaddr: vaddr,
-                            p_paddr: paddr,
-                            p_filesz: filesz,
-                            p_memsz: memsz,
-                            p_align: s.alignment,
-                        },
-                    ))
-                },
-            )
-            .collect()
-    }
-}
-
-impl Writable for Elf<'_> {
-    fn byte_len(&self) -> usize {
-        mem::size_of::<Header>()
-            + mem::size_of::<ProgramHeader>() * self.segments.len()
-            + self
-                .segments
-                .iter()
-                .map(|s| s.data.byte_len())
-                .sum::<usize>()
-    }
-
-    fn write(&self, out: &mut dyn Write) -> io::Result<()> {
+    pub fn write(&self, out: &mut dyn Write) -> io::Result<()> {
         let segments: Vec<_> = self.alloc_segments();
 
         let mut sections = vec![SectionHeader::zeroed()];
@@ -256,7 +196,7 @@ impl Writable for Elf<'_> {
             out.write_all(&pad)?;
             pos += pad.len();
 
-            s.data.write(out)?;
+            out.write_all(s.data)?;
             pos += ph.p_filesz as usize;
         }
 
@@ -276,6 +216,52 @@ impl Writable for Elf<'_> {
         }
 
         Ok(())
+    }
+
+    fn alloc_segments(&self) -> Vec<(&Segment<'data>, ProgramHeader)> {
+        self.segments
+            .iter()
+            .scan(
+                (
+                    (mem::size_of::<Header>()
+                        + mem::size_of::<ProgramHeader>() * self.segments.len())
+                        as u64,
+                    0x0040_0000,
+                    0x0040_0000,
+                ),
+                |(pfend, pvoff, ppoff), s| {
+                    let filesz = s.data.len() as u64;
+                    let memsz = s.mem_size.unwrap_or(filesz);
+
+                    let offset = align_up(*pfend, s.alignment);
+                    *pfend = offset + filesz;
+
+                    let vaddr = s
+                        .virtual_address
+                        .unwrap_or_else(|| align_up(*pvoff, s.alignment));
+                    *pvoff = vaddr + memsz;
+
+                    let paddr = s
+                        .physical_address
+                        .unwrap_or_else(|| align_up(*ppoff, s.alignment));
+                    *ppoff = paddr + memsz;
+
+                    Some((
+                        s,
+                        ProgramHeader {
+                            p_type: s.ty.into(),
+                            p_flags: s.flags.bits(),
+                            p_offset: offset,
+                            p_vaddr: vaddr,
+                            p_paddr: paddr,
+                            p_filesz: filesz,
+                            p_memsz: memsz,
+                            p_align: s.alignment,
+                        },
+                    ))
+                },
+            )
+            .collect()
     }
 }
 
@@ -346,7 +332,7 @@ pub struct Segment<'data> {
     physical_address: Option<u64>,
     mem_size: Option<u64>,
     alignment: u64,
-    data: &'data dyn Writable,
+    data: &'data [u8],
     entry: bool,
 }
 
@@ -367,7 +353,7 @@ impl<'data> Segment<'data> {
         physical_address: Option<u64>,
         mem_size: Option<u64>,
         #[builder(default = 0x1000)] alignment: u64,
-        data: &'data dyn Writable,
+        data: &'data [u8],
         #[builder(default)] entry: bool,
     ) -> Result<Self, Error> {
         if name
@@ -376,10 +362,7 @@ impl<'data> Segment<'data> {
             .unwrap_or_default()
         {
             Err(Error::ReservedName(name.unwrap().to_string()))
-        } else if mem_size
-            .map(|s| s < data.byte_len() as u64)
-            .unwrap_or_default()
-        {
+        } else if mem_size.map(|s| s < data.len() as u64).unwrap_or_default() {
             Err(Error::InsufficientMemSize)
         } else if !alignment.is_power_of_two() {
             Err(Error::Alignment)
@@ -414,8 +397,8 @@ impl<'data> Segment<'data> {
         let s2 = get_addr(self);
         match (s1, s2) {
             (Some(s1), Some(s2)) => {
-                let e1 = self.mem_size.unwrap_or(self.data.byte_len() as u64);
-                let e2 = other.mem_size.unwrap_or(other.data.byte_len() as u64);
+                let e1 = self.mem_size.unwrap_or(self.data.len() as u64);
+                let e2 = other.mem_size.unwrap_or(other.data.len() as u64);
                 e1 > s2 && s1 < e2
             }
             _ => false,
