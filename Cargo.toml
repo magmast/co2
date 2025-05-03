@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
-bitflags = "2.9.0"
+bitflags = { version = "2.9.0", features = ["bytemuck"] }
 bon = "3.6.3"
 bumpalo = { version = "3.17.0", features = ["boxed", "collections"] }
 bytemuck = { version = "1.23.0", features = ["derive"] }

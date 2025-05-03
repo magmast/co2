@@ -6,14 +6,17 @@ use std::{
 
 use bitflags::bitflags;
 use bon::bon;
+use bytemuck::Zeroable;
 use itertools::Itertools;
-use raw::{Header, Ident, ProgramHeader, SectionHeader};
+use raw::{Header, Ident, ProgramHeader, SectionFlags, SectionHeader};
 
 use crate::Writable;
 
 pub mod raw;
 
 pub const MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+
+const SHSTRTAB_NAME: &str = ".shstrtab";
 
 fn align_up(addr: u64, align: u64) -> u64 {
     (addr + align - 1) & !(align - 1)
@@ -53,7 +56,18 @@ impl<'data> Elf<'data> {
     fn verify_segments(segments: &[Segment<'data>]) -> Result<(), Error> {
         Self::verify_interp_order(segments)?;
 
-        if segments.len() > u16::MAX.into() {
+        if segments.is_empty() {
+            Err(Error::MissingSegments)
+        } else if let Some(name) = segments
+            .iter()
+            .filter_map(|s| s.name.as_ref())
+            .counts()
+            .into_iter()
+            .find(|(_, count)| *count > 1)
+            .map(|(name, _)| name.clone())
+        {
+            Err(Error::DuplicatedNames(name))
+        } else if segments.len() > u16::MAX.into() {
             Err(Error::SegmentCount)
         } else if segments
             .iter()
@@ -155,6 +169,49 @@ impl Writable for Elf<'_> {
     fn write(&self, out: &mut dyn Write) -> io::Result<()> {
         let segments: Vec<_> = self.alloc_segments();
 
+        let mut sections = vec![SectionHeader::zeroed()];
+        let mut sh_name_offset = 1;
+        for (s, ph) in segments.iter() {
+            if let Some(name) = s.name.as_ref() {
+                sections.push(SectionHeader {
+                    sh_name: sh_name_offset as u32,
+                    sh_type: if s.entry { 1 } else { todo!() },
+                    sh_flags: if s.entry {
+                        SectionFlags::SHF_ALLOC | SectionFlags::SHF_EXECINSTR
+                    } else {
+                        todo!()
+                    },
+                    sh_addr: ph.p_vaddr,
+                    sh_offset: ph.p_offset,
+                    sh_size: ph.p_filesz,
+                    sh_link: 0,
+                    sh_info: 0,
+                    sh_addralign: ph.p_align,
+                    sh_entsize: 0,
+                });
+                sh_name_offset += name.len() + 1;
+            }
+        }
+
+        let shstrtab_off = segments
+            .last()
+            .map(|(_, ph)| ph.p_offset + ph.p_filesz)
+            .unwrap();
+
+        sections.push(SectionHeader {
+            sh_name: sh_name_offset as u32,
+            sh_type: 3,
+            sh_flags: SectionFlags::empty(),
+            sh_addr: 0,
+            sh_offset: shstrtab_off,
+            sh_size: (sh_name_offset + SHSTRTAB_NAME.len() + 1) as u64,
+            sh_link: 0,
+            sh_info: 0,
+            sh_addralign: 1,
+            sh_entsize: 0,
+        });
+        sh_name_offset += SHSTRTAB_NAME.len() + 1;
+
         let header = Header {
             e_ident: Ident {
                 ei_mag: MAGIC,
@@ -167,21 +224,21 @@ impl Writable for Elf<'_> {
             },
             e_type: self.ty.into(),
             e_machine: self.machine,
-            e_version: 1,
+            e_version: 1, // EV_CURRENT
             e_entry: segments
                 .iter()
                 .find(|(s, _)| s.entry)
                 .map(|(_, h)| h.p_vaddr)
                 .unwrap_or_default(),
             e_phoff: mem::size_of::<Header>() as u64,
-            e_shoff: 0,
+            e_shoff: shstrtab_off + sh_name_offset as u64,
             e_flags: 0,
             e_ehsize: mem::size_of::<Header>() as u16,
             e_phentsize: mem::size_of::<ProgramHeader>() as u16,
             e_phnum: segments.len() as u16,
             e_shentsize: mem::size_of::<SectionHeader>() as u16,
-            e_shnum: 0,
-            e_shstrndx: 0,
+            e_shnum: sections.len() as u16,
+            e_shstrndx: (sections.len() - 1) as u16,
         };
 
         let mut pos = 0;
@@ -194,13 +251,28 @@ impl Writable for Elf<'_> {
             pos += mem::size_of::<ProgramHeader>();
         }
 
-        for (s, ph) in segments {
+        for (s, ph) in &segments {
             let pad = vec![0; (ph.p_offset as usize).saturating_sub(pos)];
             out.write_all(&pad)?;
             pos += pad.len();
 
             s.data.write(out)?;
             pos += ph.p_filesz as usize;
+        }
+
+        // First null string of shstrtab section data
+        out.write_all(&[0])?;
+
+        for name in segments.iter().filter_map(|(s, _)| s.name.as_ref()) {
+            out.write_all(name.as_bytes())?;
+            out.write_all(&[0])?;
+        }
+
+        out.write_all(SHSTRTAB_NAME.as_bytes())?;
+        out.write_all(&[0])?;
+
+        for sh in sections {
+            out.write_all(bytemuck::bytes_of(&sh))?;
         }
 
         Ok(())
@@ -267,6 +339,7 @@ impl TryFrom<u16> for ProcType {
 }
 
 pub struct Segment<'data> {
+    name: Option<String>,
     ty: SegmentType,
     flags: SegmentFlags,
     virtual_address: Option<u64>,
@@ -281,6 +354,13 @@ pub struct Segment<'data> {
 impl<'data> Segment<'data> {
     #[builder]
     pub fn new(
+        /// Name of a section header for this segment.
+        ///
+        /// If it's `None` then:
+        ///
+        /// - If the segment is marked as entry: it's set to ".text"
+        /// - Otherwise: No section header is generated for the section
+        name: Option<String>,
         #[builder(default = SegmentType::Load)] ty: SegmentType,
         flags: SegmentFlags,
         virtual_address: Option<u64>,
@@ -290,7 +370,13 @@ impl<'data> Segment<'data> {
         data: &'data dyn Writable,
         #[builder(default)] entry: bool,
     ) -> Result<Self, Error> {
-        if mem_size
+        if name
+            .as_ref()
+            .map(|n| n == SHSTRTAB_NAME)
+            .unwrap_or_default()
+        {
+            Err(Error::ReservedName(name.unwrap().to_string()))
+        } else if mem_size
             .map(|s| s < data.byte_len() as u64)
             .unwrap_or_default()
         {
@@ -301,6 +387,7 @@ impl<'data> Segment<'data> {
             Err(Error::NonExecutableEntry)
         } else {
             Ok(Self {
+                name: name.or_else(|| entry.then(|| ".text".into())),
                 ty,
                 flags,
                 virtual_address,
@@ -436,4 +523,10 @@ pub enum Error {
     NonExecutableEntry,
     #[error("Number of segments must fit within u16")]
     SegmentCount,
+    #[error("Name {0} is used by multiple segments")]
+    DuplicatedNames(String),
+    #[error("Name {0} is reserved and cannot be used as a segment name")]
+    ReservedName(String),
+    #[error("At least one segment is required")]
+    MissingSegments,
 }

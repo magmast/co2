@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -49,7 +50,7 @@ pub struct ProgramHeader {
 pub struct SectionHeader {
     pub sh_name: u32,
     pub sh_type: u32,
-    pub sh_flags: u64,
+    pub sh_flags: SectionFlags,
     pub sh_addr: u64,
     pub sh_offset: u64,
     pub sh_size: u64,
@@ -57,4 +58,25 @@ pub struct SectionHeader {
     pub sh_info: u32,
     pub sh_addralign: u64,
     pub sh_entsize: u64,
+}
+
+bitflags! {
+    #[derive(Debug, Pod, Zeroable, Clone, Copy)]
+    #[repr(C)]
+    pub struct SectionFlags: u64 {
+        const SHF_WRITE = 0x01;
+        const SHF_ALLOC = 0x02;
+        const SHF_EXECINSTR = 0x04;
+        const SHF_MERGE = 0x10;
+        const SHF_STRINGS = 0x20;
+        const SHF_INFO_LINK = 0x40;
+        const SHF_LINK_ORDER = 0x80;
+        const SHF_OS_NONCONFORMING = 0x100;
+        const SHF_GROUP = 0x200;
+        const SHF_TLS = 0x400;
+        const SHF_MASKOS = 0x0FF0_0000;
+        const SHF_MASKPROC =0xF000_0000;
+        const SHF_ORDERED = 0x0400_0000;
+        const SHF_EXCLUDE = 0x0800_0000;
+    }
 }

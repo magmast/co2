@@ -26,8 +26,8 @@ impl From<Reg> for u8 {
     fn from(value: Reg) -> Self {
         match value {
             Reg::Rax => 0,
-            Reg::Rdx => 1,
-            Reg::Rbx => 2,
+            Reg::Rdx => 2,
+            Reg::Rbx => 3,
             Reg::Rdi => 7,
         }
     }
@@ -57,7 +57,7 @@ impl Writable for Instruction {
             Self::Push(_) => 1,
             Self::Pop(_) => 1,
             Self::Mov(_, RegOrImm::Reg(_)) => 3,
-            Self::Mov(_, RegOrImm::Imm(_)) => 6,
+            Self::Mov(_, RegOrImm::Imm(_)) => 10,
             Self::Add(_, _) => 3,
             Self::Sub(_, _) => 3,
             Self::Mul(_) => 3,
