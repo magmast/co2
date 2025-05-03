@@ -94,58 +94,6 @@ impl<'data> Elf<'data> {
         }
     }
 
-    pub fn write(&self, mut out: impl Write) -> Result<(), io::Error> {
-        let segments: Vec<_> = self.alloc_segments();
-
-        let entry_segment = segments.iter().find(|(s, _)| s.entry);
-
-        let header = Header {
-            e_ident: Ident {
-                ei_mag: MAGIC,
-                ei_class: 2,
-                ei_data: 1,
-                ei_version: 1,
-                ei_osabi: 0,
-                ei_abiversion: 0,
-                ei_pad: [0; 7],
-            },
-            e_type: self.ty.into(),
-            e_machine: self.machine,
-            e_version: 1,
-            e_entry: entry_segment.map(|(_, h)| h.p_vaddr).unwrap_or_default(),
-            e_phoff: mem::size_of::<Header>() as u64,
-            e_shoff: 0,
-            e_flags: 0,
-            e_ehsize: mem::size_of::<Header>() as u16,
-            e_phentsize: mem::size_of::<ProgramHeader>() as u16,
-            e_phnum: segments.len() as u16,
-            e_shentsize: mem::size_of::<SectionHeader>() as u16,
-            e_shnum: 0,
-            e_shstrndx: 0,
-        };
-
-        let mut pos = 0;
-
-        out.write_all(bytemuck::bytes_of(&header))?;
-        pos += mem::size_of::<Header>();
-
-        for (_, ph) in &segments {
-            out.write_all(bytemuck::bytes_of(ph))?;
-            pos += mem::size_of::<ProgramHeader>();
-        }
-
-        for (s, ph) in segments {
-            let pad = vec![0; (ph.p_offset as usize).saturating_sub(pos)];
-            out.write_all(&pad)?;
-            pos += pad.len();
-
-            s.data.write(&mut out)?;
-            pos += ph.p_filesz as usize;
-        }
-
-        Ok(())
-    }
-
     fn alloc_segments(&self) -> Vec<(&Segment<'data>, ProgramHeader)> {
         self.segments
             .iter()
@@ -190,6 +138,72 @@ impl<'data> Elf<'data> {
                 },
             )
             .collect()
+    }
+}
+
+impl Writable for Elf<'_> {
+    fn byte_len(&self) -> usize {
+        mem::size_of::<Header>()
+            + mem::size_of::<ProgramHeader>() * self.segments.len()
+            + self
+                .segments
+                .iter()
+                .map(|s| s.data.byte_len())
+                .sum::<usize>()
+    }
+
+    fn write(&self, out: &mut dyn Write) -> io::Result<()> {
+        let segments: Vec<_> = self.alloc_segments();
+
+        let header = Header {
+            e_ident: Ident {
+                ei_mag: MAGIC,
+                ei_class: 2,
+                ei_data: 1,
+                ei_version: 1,
+                ei_osabi: 0,
+                ei_abiversion: 0,
+                ei_pad: [0; 7],
+            },
+            e_type: self.ty.into(),
+            e_machine: self.machine,
+            e_version: 1,
+            e_entry: segments
+                .iter()
+                .find(|(s, _)| s.entry)
+                .map(|(_, h)| h.p_vaddr)
+                .unwrap_or_default(),
+            e_phoff: mem::size_of::<Header>() as u64,
+            e_shoff: 0,
+            e_flags: 0,
+            e_ehsize: mem::size_of::<Header>() as u16,
+            e_phentsize: mem::size_of::<ProgramHeader>() as u16,
+            e_phnum: segments.len() as u16,
+            e_shentsize: mem::size_of::<SectionHeader>() as u16,
+            e_shnum: 0,
+            e_shstrndx: 0,
+        };
+
+        let mut pos = 0;
+
+        out.write_all(bytemuck::bytes_of(&header))?;
+        pos += mem::size_of::<Header>();
+
+        for (_, ph) in &segments {
+            out.write_all(bytemuck::bytes_of(ph))?;
+            pos += mem::size_of::<ProgramHeader>();
+        }
+
+        for (s, ph) in segments {
+            let pad = vec![0; (ph.p_offset as usize).saturating_sub(pos)];
+            out.write_all(&pad)?;
+            pos += pad.len();
+
+            s.data.write(out)?;
+            pos += ph.p_filesz as usize;
+        }
+
+        Ok(())
     }
 }
 

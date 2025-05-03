@@ -4,6 +4,7 @@ use std::{fs::File, io::BufWriter};
 use anyhow::{Context, Result, anyhow};
 use bumpalo::Bump;
 use co2::{
+    Writable,
     elf::{Elf, Segment, SegmentFlags},
     parser,
 };
@@ -38,8 +39,9 @@ fn main() -> Result<()> {
         ])
         .build()?;
 
-    let f = BufWriter::new(File::create("a.out").context("Failed to create file for the program")?);
-    elf.write(f)?;
+    let mut f =
+        BufWriter::new(File::create("a.out").context("Failed to create file for the program")?);
+    elf.write(&mut f)?;
 
     Ok(())
 }
