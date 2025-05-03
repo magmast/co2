@@ -12,22 +12,28 @@ use winnow::Parser;
 
 const CODE: &str = "
 int main() {
-    return 8;
+    4 * 8;
+    return (2 + 2) * 2;
 }
 ";
 
 fn main() -> Result<()> {
-    let bump = Bump::new();
+    let instructions = {
+        let bump = Bump::new();
 
-    let func = parser::file(&bump)
-        .parse(CODE)
-        .map_err(|err| anyhow!("{err}"))
-        .context("Parsing failed")?
-        .into_iter()
-        .next()
-        .context("No functions are defined")?;
+        let func = parser::file(&bump)
+            .parse(CODE)
+            .map_err(|err| anyhow!("{err}"))
+            .context("Parsing failed")?
+            .into_iter()
+            .next()
+            .context("No functions are defined")?;
 
-    let instructions = co2::compile(&func);
+        let mut instructions = Vec::new();
+        co2::compile(&func, &mut instructions);
+
+        instructions
+    };
 
     let elf = Elf::builder()
         .segments(vec![
