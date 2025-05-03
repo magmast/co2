@@ -1,27 +1,45 @@
-use anyhow::{Result, anyhow};
+use core::str;
+use std::{fs::File, io::BufWriter};
+
+use anyhow::{Context, Result, anyhow};
 use bumpalo::Bump;
-use co2::{eval::Interpreter, parser};
+use co2::{
+    elf::{Elf, Segment, SegmentFlags},
+    parser,
+};
 use winnow::Parser;
 
 const CODE: &str = "
-int magic_number() {
-    return 7 * 5 + 2;
-}
-
-void side_effect(void) {}
-
-int main(void) {
-    return 2 + 2 * 2;
+int main() {
+    return 8;
 }
 ";
 
 fn main() -> Result<()> {
     let bump = Bump::new();
-    let file = parser::file(&bump)
+
+    let func = parser::file(&bump)
         .parse(CODE)
-        .map_err(|err| anyhow!("{err}"))?;
-    let interpreter = Interpreter::default();
-    let result = interpreter.eval(&file)?;
-    println!("{}", result);
+        .map_err(|err| anyhow!("{err}"))
+        .context("Parsing failed")?
+        .into_iter()
+        .next()
+        .context("No functions are defined")?;
+
+    let instructions = co2::compile(&func);
+
+    let elf = Elf::builder()
+        .segments(vec![
+            Segment::builder()
+                .flags(SegmentFlags::READ | SegmentFlags::EXEC)
+                .data(&instructions)
+                .entry(true)
+                .build()?,
+        ])
+        .build()?;
+
+    let f = BufWriter::new(File::create("a.out").context("Failed to create file for the program")?);
+    elf.write(f)?;
+
     Ok(())
 }

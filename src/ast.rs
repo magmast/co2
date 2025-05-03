@@ -54,6 +54,12 @@ pub struct Int<'input> {
     pub suffix: Option<IntSuffix>,
 }
 
+impl Int<'_> {
+    pub fn to_u64(&self) -> u64 {
+        u64::from_str_radix(self.value, self.radix.into()).unwrap()
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum IntRadix {
     Bin,
