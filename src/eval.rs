@@ -131,6 +131,7 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
                 int.value,
                 int.radix.into(),
             )?))),
+            Expr::Call(_) => todo!(),
             Expr::Assign(assign) => self.eval_assign(assign),
             Expr::Add(lhs, rhs) => {
                 (self.eval_expr(lhs)? + self.eval_expr(rhs)?).map(|value| &*self.bump.alloc(value))

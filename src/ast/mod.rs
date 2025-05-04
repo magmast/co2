@@ -77,6 +77,7 @@ pub struct If<'bump, 'input> {
 pub enum Expr<'bump, 'input> {
     Ident(&'input str),
     Int(Int<'input>),
+    Call(Call<'bump, 'input>),
     Neg(&'bump Expr<'bump, 'input>),
     Pos(&'bump Expr<'bump, 'input>),
     Mul(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
@@ -142,6 +143,12 @@ impl IntSuffix {
             _ => self.clone(),
         }
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Call<'bump, 'input> {
+    pub ident: &'input str,
+    pub params: Vec<'bump, Expr<'bump, 'input>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]

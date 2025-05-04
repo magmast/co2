@@ -13,7 +13,7 @@ use winnow::{
 
 use crate::ast::{Assign, Decl, Expr, Func, If, Int, IntRadix, IntSuffix, Param, Stmt, Type};
 
-use super::File;
+use super::{Call, File};
 
 pub fn file<'bump, 'input: 'bump>(
     bump: &'bump Bump,
@@ -288,6 +288,7 @@ fn primary<'bump, 'input: 'bump>(
 ) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
     alt((
         group(bump),
+        call(bump).map(Expr::Call),
         int.map(Expr::Int),
         ident.map(Expr::Ident),
         fail.context(StrContext::Label("primary expression")),
@@ -306,6 +307,20 @@ fn group<'bump, 'input: 'bump>(
             .context(StrContext::Label("group delimiter"))
             .context(StrContext::Expected(StrContextValue::CharLiteral(')'))),
     )
+}
+
+fn call<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Call<'bump, 'input>, ErrMode<ContextError>> {
+    (
+        ident,
+        delimited(
+            token('('),
+            separated(bump, expr(bump), token(',')),
+            token(')'),
+        ),
+    )
+        .map(|(ident, params)| Call { ident, params })
 }
 
 fn ident<'input>(input: &mut &'input str) -> ModalResult<&'input str> {
@@ -404,6 +419,26 @@ where
     E: ParserError<I>,
 {
     delimited(multispace0, parser, multispace0)
+}
+
+fn separated<I, O, E, So>(
+    bump: &Bump,
+    mut parser: impl Parser<I, O, E>,
+    mut separator: impl Parser<I, So, E>,
+) -> impl Parser<I, Vec<O>, E>
+where
+    I: Stream,
+{
+    move |input: &mut I| {
+        let mut vec = Vec::new_in(bump);
+        while let Ok(item) = parser.parse_next(input) {
+            vec.push(item);
+            if separator.parse_next(input).is_err() {
+                break;
+            }
+        }
+        Ok(vec)
+    }
 }
 
 #[cfg(test)]

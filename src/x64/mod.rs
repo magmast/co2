@@ -1,16 +1,20 @@
-use std::{
-    io::{self, Write},
-    ops::{Deref, DerefMut},
-};
+use std::io::{self, Write};
 
 mod raw;
 
 use raw::REX_W;
 pub use raw::Reg;
 
-pub struct Encoder<W: Write>(W);
+pub struct Encoder<W: Write> {
+    write: W,
+    offset: usize,
+}
 
 impl<W: Write> Encoder<W> {
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
     pub fn push<M: Mode>(&mut self, reg: Reg) -> io::Result<()> {
         self.write_prefix::<M>()?;
         self.write_byte(0x50 + u8::from(reg))
@@ -66,6 +70,11 @@ impl<W: Write> Encoder<W> {
 
     pub fn jz(&mut self, disp: i32) -> io::Result<()> {
         self.write_all(&[0x0F, 0x84])?;
+        self.write_all(&disp.to_le_bytes())
+    }
+
+    pub fn call(&mut self, disp: i32) -> io::Result<()> {
+        self.write_byte(0xE8)?;
         self.write_all(&disp.to_le_bytes())
     }
 
@@ -155,10 +164,6 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    fn write_byte(&mut self, byte: u8) -> io::Result<()> {
-        self.write_all(&[byte])
-    }
-
     fn write_prefix<M: Mode>(&mut self) -> io::Result<()> {
         if let Some(prefix) = M::PREFIX {
             self.write_byte(prefix)
@@ -166,25 +171,24 @@ impl<W: Write> Encoder<W> {
             Ok(())
         }
     }
-}
 
-impl<W: Write> Deref for Encoder<W> {
-    type Target = W;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    fn write_byte(&mut self, byte: u8) -> io::Result<()> {
+        self.write_all(&[byte])
     }
-}
 
-impl<W: Write> DerefMut for Encoder<W> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+    pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write.write_all(bytes)?;
+        self.offset += bytes.len();
+        Ok(())
     }
 }
 
 impl<W: Write> From<W> for Encoder<W> {
     fn from(value: W) -> Self {
-        Self(value)
+        Self {
+            write: value,
+            offset: 0,
+        }
     }
 }
 

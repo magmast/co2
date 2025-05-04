@@ -99,6 +99,7 @@ impl<'input, W: Write> Compiler<'input, W> {
         match expr {
             Expr::Int(int) => self.int(int),
             Expr::Ident(ident) => self.ident(ident),
+            Expr::Call(_) => todo!(),
             Expr::Assign(assign) => self.assign(assign),
             Expr::Add(lhs, rhs) => self.add(lhs, rhs),
             Expr::Sub(lhs, rhs) => self.sub(lhs, rhs),
