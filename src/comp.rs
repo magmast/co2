@@ -66,6 +66,8 @@ impl<'input, W: Write> Compiler<'input, W> {
             Expr::Sub(lhs, rhs) => self.sub(lhs, rhs),
             Expr::Mul(lhs, rhs) => self.mul(lhs, rhs),
             Expr::Div(lhs, rhs) => self.div(lhs, rhs),
+            Expr::Pos(expr) => self.expr(expr),
+            Expr::Neg(expr) => self.neg(expr),
         }
     }
 
@@ -116,6 +118,12 @@ impl<'input, W: Write> Compiler<'input, W> {
         self.enc.push(Reg::Rax)?;
         self.enc.mov(0, Reg::Rdx)?;
         self.enc.idiv(Reg::Rbx)?;
+        Ok(())
+    }
+
+    fn neg(&mut self, expr: &Expr) -> Result<(), Error> {
+        self.expr(expr)?;
+        self.enc.neg(Reg::Rax)?;
         Ok(())
     }
 

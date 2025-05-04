@@ -155,9 +155,9 @@ fn multiplicative<'bump, 'input: 'bump>(
     bump: &'bump Bump,
 ) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
     move |input: &mut &'input str| {
-        let init = primary(bump).parse_next(input)?;
+        let init = unary(bump).parse_next(input)?;
 
-        repeat(0.., (token(one_of(b"*/")), primary(bump)))
+        repeat(0.., (token(one_of(b"*/")), unary(bump)))
             .fold(
                 || init.clone(),
                 |lhs, (op, rhs)| match op {
@@ -167,6 +167,27 @@ fn multiplicative<'bump, 'input: 'bump>(
                 },
             )
             .parse_next(input)
+    }
+}
+
+fn unary<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
+    UnaryParser { bump }
+}
+
+struct UnaryParser<'bump> {
+    bump: &'bump Bump,
+}
+
+impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ContextError> for UnaryParser<'bump> {
+    fn parse_next(&mut self, input: &mut &'input str) -> Result<Expr<'bump, 'input>, ContextError> {
+        alt((
+            preceded(token('-'), unary(self.bump)).map(|expr| Expr::Neg(self.bump.alloc(expr))),
+            preceded(token('+'), unary(self.bump)).map(|expr| Expr::Pos(self.bump.alloc(expr))),
+            primary(self.bump),
+        ))
+        .parse_next(input)
     }
 }
 

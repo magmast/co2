@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fmt::{self, Display, Formatter},
-    ops::{Add, Div, Mul, Sub},
+    ops::{Add, Div, Mul, Neg, Sub},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -128,6 +128,11 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
             Expr::Div(lhs, rhs) => {
                 (self.eval_expr(lhs)? / self.eval_expr(rhs)?).map(|value| &*self.bump.alloc(value))
             }
+            Expr::Neg(expr) => self
+                .eval_expr(expr)
+                .and_then(|result| -result)
+                .map(|value| &*self.bump.alloc(value)),
+            Expr::Pos(expr) => self.eval_expr(expr),
         }
     }
 
@@ -196,6 +201,17 @@ impl<'ast, 'input> Div for &Value<'ast, 'input> {
         match (self, rhs) {
             (Value::Number(lhs), Value::Number(rhs)) => Ok(Value::Number(lhs / rhs)),
             _ => Err(anyhow!("Only number division is allowed")),
+        }
+    }
+}
+
+impl<'ast, 'input> Neg for &Value<'ast, 'input> {
+    type Output = Result<Value<'ast, 'input>>;
+
+    fn neg(self) -> Self::Output {
+        match self {
+            Value::Number(v) => Ok(Value::Number(-v)),
+            _ => Err(anyhow!("Only number negation is allowed")),
         }
     }
 }

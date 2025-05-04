@@ -96,6 +96,11 @@ impl<W: Write> Encoder<W> {
         self.mod_rm(7, rhs)
     }
 
+    pub fn neg(&mut self, reg: Reg) -> io::Result<()> {
+        self.write_all(&[REX_W, 0xF7])?;
+        self.mod_rm(3, reg)
+    }
+
     pub fn sys_call(&mut self) -> io::Result<()> {
         self.write_all(&[0x0F, 0x05])
     }
