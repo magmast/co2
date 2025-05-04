@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use bumpalo::{Bump, collections::Vec};
 
-use crate::ast::{Expr, Func, Param, Stmt, Type};
+use crate::ast::{Assign, Expr, Func, If, Param, Stmt, Type};
 
 #[derive(Default)]
 pub struct Interpreter {
@@ -101,7 +101,22 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
                 }
                 Ok(None)
             }
+            Stmt::If(r#if) => {
+                self.eval_if(r#if)?;
+                Ok(None)
+            }
         }
+    }
+
+    fn eval_if(&'bump self, r#if: &If<'ast, 'input>) -> Result<()> {
+        let cond = self.eval_expr(&r#if.cond)?;
+        if bool::from(cond) {
+            let child = self.fork();
+            for stmt in &r#if.then {
+                child.eval_stmt(stmt)?;
+            }
+        }
+        Ok(())
     }
 
     fn eval_expr(&'bump self, expr: &Expr<'ast, 'input>) -> Result<&'bump Value<'ast, 'input>> {
@@ -116,6 +131,7 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
                 int.value,
                 int.radix.into(),
             )?))),
+            Expr::Assign(assign) => self.eval_assign(assign),
             Expr::Add(lhs, rhs) => {
                 (self.eval_expr(lhs)? + self.eval_expr(rhs)?).map(|value| &*self.bump.alloc(value))
             }
@@ -134,6 +150,13 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
                 .map(|value| &*self.bump.alloc(value)),
             Expr::Pos(expr) => self.eval_expr(expr),
         }
+    }
+
+    fn eval_assign(
+        &'bump self,
+        _assign: &Assign<'ast, 'input>,
+    ) -> Result<&'bump Value<'ast, 'input>> {
+        todo!()
     }
 
     fn fork(&'bump self) -> &'bump Self {
@@ -159,6 +182,15 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
 pub enum Value<'ast, 'input> {
     Number(i64),
     Func(&'ast Func<'ast, 'input>),
+}
+
+impl From<&Value<'_, '_>> for bool {
+    fn from(value: &Value<'_, '_>) -> Self {
+        match value {
+            Value::Number(v) => *v != 0,
+            Value::Func(_) => true,
+        }
+    }
 }
 
 impl<'ast, 'input> Add for &Value<'ast, 'input> {

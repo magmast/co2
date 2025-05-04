@@ -21,7 +21,7 @@ impl<W: Write> Encoder<W> {
         self.write_byte(0x58 + u8::from(reg))
     }
 
-    pub fn mov<M: Mode>(&mut self, src: impl Into<Src>, dst: impl Into<Dst>) -> io::Result<()> {
+    pub fn mov<M: Mode>(&mut self, dst: impl Into<Dst>, src: impl Into<Src>) -> io::Result<()> {
         self.write_prefix::<M>()?;
         match (src.into(), dst.into()) {
             (Src::Reg(src), Dst::Reg(dst)) => {
@@ -53,59 +53,74 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    pub fn movsxd<M: Mode>(&mut self, src: Reg, dst: Reg) -> io::Result<()> {
+    pub fn movsxd<M: Mode>(&mut self, dst: Reg, src: Reg) -> io::Result<()> {
         self.write_prefix::<M>()?;
         self.write_all(&[REX_W, 0x63])?;
         self.write_mod_rm(dst, src)
     }
 
-    pub fn add<M: Mode>(&mut self, lhs: Reg, rhs: Reg) -> io::Result<()> {
-        self.write_prefix::<M>()?;
-        self.write_byte(0x01)?;
-        self.write_mod_rm(rhs, lhs)
+    pub fn jmp(&mut self, disp: i32) -> io::Result<()> {
+        self.write_byte(0xE9)?;
+        self.write_all(&disp.to_le_bytes())
     }
 
-    pub fn sub<M: Mode>(&mut self, lhs: Reg, rhs: impl Into<Src>) -> io::Result<()> {
+    pub fn jz(&mut self, disp: i32) -> io::Result<()> {
+        self.write_all(&[0x0F, 0x84])?;
+        self.write_all(&disp.to_le_bytes())
+    }
+
+    pub fn cmp(&mut self, imm: i32) -> io::Result<()> {
+        self.write_all(&[0x3D])?;
+        self.write_all(&imm.to_le_bytes())
+    }
+
+    pub fn add<M: Mode>(&mut self, dst: Reg, src: Reg) -> io::Result<()> {
         self.write_prefix::<M>()?;
-        match rhs.into() {
-            Src::Imm32(rhs) => {
+        self.write_byte(0x01)?;
+        self.write_mod_rm(src, dst)
+    }
+
+    pub fn sub<M: Mode>(&mut self, dst: Reg, src: impl Into<Src>) -> io::Result<()> {
+        self.write_prefix::<M>()?;
+        match src.into() {
+            Src::Imm32(src) => {
                 self.write_byte(0x81)?;
-                self.write_mod_rm(5, lhs)?;
-                self.write_all(&rhs.to_le_bytes())
+                self.write_mod_rm(5, dst)?;
+                self.write_all(&src.to_le_bytes())
             }
-            Src::Reg(rhs) => {
+            Src::Reg(src) => {
                 self.write_byte(0x29)?;
-                self.write_mod_rm(rhs, lhs)
+                self.write_mod_rm(src, dst)
             }
             Src::Mem32(reg, disp) => {
                 self.write_byte(0x2B)?;
-                self.write_mod_rm(lhs, (reg, disp))
+                self.write_mod_rm(dst, (reg, disp))
             }
         }
     }
 
-    pub fn mul<M: Mode>(&mut self, rhs: Reg) -> io::Result<()> {
+    pub fn mul<M: Mode>(&mut self, src: Reg) -> io::Result<()> {
         self.write_prefix::<M>()?;
         self.write_byte(0xF7)?;
-        self.write_mod_rm(4, rhs)
+        self.write_mod_rm(4, src)
     }
 
-    pub fn imul<M: Mode>(&mut self, rhs: Reg) -> io::Result<()> {
+    pub fn imul<M: Mode>(&mut self, src: Reg) -> io::Result<()> {
         self.write_prefix::<M>()?;
         self.write_byte(0xF7)?;
-        self.write_mod_rm(5, rhs)
+        self.write_mod_rm(5, src)
     }
 
-    pub fn div<M: Mode>(&mut self, rhs: Reg) -> io::Result<()> {
+    pub fn div<M: Mode>(&mut self, src: Reg) -> io::Result<()> {
         self.write_prefix::<M>()?;
         self.write_byte(0xF7)?;
-        self.write_mod_rm(6, rhs)
+        self.write_mod_rm(6, src)
     }
 
-    pub fn idiv<M: Mode>(&mut self, rhs: Reg) -> io::Result<()> {
+    pub fn idiv<M: Mode>(&mut self, src: Reg) -> io::Result<()> {
         self.write_prefix::<M>()?;
         self.write_byte(0xF7)?;
-        self.write_mod_rm(7, rhs)
+        self.write_mod_rm(7, src)
     }
 
     pub fn neg<M: Mode>(&mut self, reg: Reg) -> io::Result<()> {

@@ -1,59 +1,96 @@
 use std::{
     collections::HashMap,
     io::{self, Write},
+    mem,
+    ops::{Deref, DerefMut},
 };
 
 use crate::{
-    ast::{Decl, Expr, Func, Int, Stmt},
+    ast::{Assign, Decl, Expr, Func, If, Int, Stmt},
     x64::{Encoder, M32, M64, Reg},
 };
 
 pub struct Compiler<'input, W: Write> {
     enc: Encoder<W>,
-    frames: Vec<Frame<'input>>,
+    scopes: Vec<HashMap<&'input str, i32>>,
+    offset: i32,
 }
 
 impl<'input, W: Write> Compiler<'input, W> {
     pub fn compile(&mut self, func: &Func<'_, 'input>) -> Result<(), Error> {
         self.func(func)?;
-        self.enc.movsxd::<M64>(Reg::Ax, Reg::Di)?;
-        self.enc.mov::<M64>(60i32, Reg::Ax)?;
+        self.enc.movsxd::<M64>(Reg::Di, Reg::Ax)?;
+        self.enc.mov::<M64>(Reg::Ax, 60i32)?;
         self.enc.sys_call()?;
         Ok(())
     }
 
     fn func(&mut self, func: &Func<'_, 'input>) -> Result<(), Error> {
-        self.frames.push(Frame::new(func));
+        self.offset = 0;
+        let body_bytes = self.buf(|c| c.block(&func.body))?;
+        let frame_size = -self.offset;
 
         self.enc.push::<M64>(Reg::Bp)?;
-        self.enc.mov::<M64>(Reg::Sp, Reg::Bp)?;
-        self.enc.sub::<M64>(Reg::Sp, self.frame().size() as i32)?;
-
-        for stmt in &func.body {
-            self.stmt(stmt)?;
-        }
-
         self.enc.mov::<M64>(Reg::Bp, Reg::Sp)?;
+        self.enc.sub::<M64>(Reg::Sp, frame_size)?;
+        self.enc.write_all(&body_bytes)?;
+        self.enc.mov::<M64>(Reg::Sp, Reg::Bp)?;
         self.enc.pop::<M64>(Reg::Bp)?;
-
-        self.frames.pop();
 
         Ok(())
     }
 
-    fn stmt(&mut self, stmt: &Stmt) -> Result<(), Error> {
+    fn block(&mut self, block: &[Stmt<'_, 'input>]) -> Result<(), Error> {
+        let mut scope = self.enter();
+        for stmt in block {
+            scope.stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    fn stmt(&mut self, stmt: &Stmt<'_, 'input>) -> Result<(), Error> {
         match stmt {
             Stmt::Decl(decl) => self.decl(decl),
+            Stmt::If(r#if) => self.r#if(r#if),
             Stmt::Expr(expr) => self.expr(expr),
             Stmt::Return(expr) => self.expr(expr),
         }
     }
 
-    fn decl(&mut self, decl: &Decl) -> Result<(), Error> {
+    fn decl(&mut self, decl: &Decl<'_, 'input>) -> Result<(), Error> {
         if let Some(init) = &decl.init {
             self.expr(init)?;
-            let offset = self.frame().get(decl.ident).unwrap();
-            self.enc.mov::<M32>(Reg::Ax, (Reg::Bp, offset))?;
+            self.enc.mov::<M32>((Reg::Bp, self.offset), Reg::Ax)?;
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .insert(decl.ident, self.offset);
+            self.offset -= 4;
+        }
+        Ok(())
+    }
+
+    fn r#if(&mut self, r#if: &If<'_, 'input>) -> Result<(), Error> {
+        let else_bytes = r#if
+            .r#else
+            .as_ref()
+            .map(|block| self.buf(|c| c.block(block)))
+            .transpose()?;
+
+        let then_bytes = self.buf(|c| {
+            c.block(&r#if.then)?;
+            if let Some(else_bytes) = &else_bytes {
+                c.enc.jmp(else_bytes.len() as i32)?;
+            }
+            Ok(())
+        })?;
+
+        self.expr(&r#if.cond)?;
+        self.enc.cmp(0)?;
+        self.enc.jz(then_bytes.len() as i32)?;
+        self.enc.write_all(&then_bytes)?;
+        if let Some(else_bytes) = else_bytes {
+            self.enc.write_all(&else_bytes)?;
         }
         Ok(())
     }
@@ -62,6 +99,7 @@ impl<'input, W: Write> Compiler<'input, W> {
         match expr {
             Expr::Int(int) => self.int(int),
             Expr::Ident(ident) => self.ident(ident),
+            Expr::Assign(assign) => self.assign(assign),
             Expr::Add(lhs, rhs) => self.add(lhs, rhs),
             Expr::Sub(lhs, rhs) => self.sub(lhs, rhs),
             Expr::Mul(lhs, rhs) => self.mul(lhs, rhs),
@@ -72,12 +110,19 @@ impl<'input, W: Write> Compiler<'input, W> {
     }
 
     fn int(&mut self, int: &Int) -> Result<(), Error> {
-        self.enc.mov::<M32>(int.to_i32(), Reg::Ax)?;
+        self.enc.mov::<M32>(Reg::Ax, int.to_i32())?;
         Ok(())
     }
 
     fn ident(&mut self, ident: &str) -> Result<(), Error> {
-        let offset = self.frame().get(ident).ok_or(Error::Undeclared)?;
+        let offset = self.get(ident)?;
+        self.enc.mov::<M32>(Reg::Ax, (Reg::Bp, offset))?;
+        Ok(())
+    }
+
+    fn assign(&mut self, assign: &Assign) -> Result<(), Error> {
+        self.expr(&assign.value)?;
+        let offset = self.get(assign.ident)?;
         self.enc.mov::<M32>((Reg::Bp, offset), Reg::Ax)?;
         Ok(())
     }
@@ -95,7 +140,7 @@ impl<'input, W: Write> Compiler<'input, W> {
         self.expr(lhs)?;
         self.enc.push::<M32>(Reg::Ax)?;
         self.expr(rhs)?;
-        self.enc.mov::<M32>(Reg::Ax, Reg::Bx)?;
+        self.enc.mov::<M32>(Reg::Bx, Reg::Ax)?;
         self.enc.pop::<M32>(Reg::Ax)?;
         self.enc.sub::<M32>(Reg::Ax, Reg::Bx)?;
         Ok(())
@@ -114,9 +159,9 @@ impl<'input, W: Write> Compiler<'input, W> {
         self.expr(lhs)?;
         self.enc.push::<M32>(Reg::Ax)?;
         self.expr(rhs)?;
-        self.enc.mov::<M32>(Reg::Ax, Reg::Bx)?;
+        self.enc.mov::<M32>(Reg::Bx, Reg::Ax)?;
         self.enc.pop::<M32>(Reg::Ax)?;
-        self.enc.mov::<M32>(0, Reg::Dx)?;
+        self.enc.mov::<M32>(Reg::Dx, 0)?;
         self.enc.idiv::<M32>(Reg::Bx)?;
         Ok(())
     }
@@ -127,8 +172,32 @@ impl<'input, W: Write> Compiler<'input, W> {
         Ok(())
     }
 
-    fn frame(&self) -> &Frame<'input> {
-        self.frames.last().unwrap()
+    fn buf(
+        &mut self,
+        f: impl FnOnce(&mut Compiler<'input, &mut Vec<u8>>) -> Result<(), Error>,
+    ) -> Result<Vec<u8>, Error> {
+        let mut buf = vec![];
+        let mut child = Compiler::from(&mut buf);
+        child.scopes = mem::take(&mut self.scopes);
+        child.offset = self.offset;
+        let result = f(&mut child);
+        self.scopes = child.scopes;
+        self.offset = child.offset;
+        result.and(Ok(buf))
+    }
+
+    fn enter(&mut self) -> ScopeGuard<'_, 'input, W> {
+        self.scopes.push(HashMap::new());
+        ScopeGuard(self)
+    }
+
+    fn get(&self, ident: &str) -> Result<i32, Error> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(ident))
+            .copied()
+            .ok_or(Error::Undeclared)
     }
 }
 
@@ -136,44 +205,31 @@ impl<W: Write> From<W> for Compiler<'_, W> {
     fn from(value: W) -> Self {
         Self {
             enc: Encoder::from(value),
-            frames: vec![],
+            offset: 0,
+            scopes: vec![HashMap::new()],
         }
     }
 }
 
-#[derive(Default)]
-struct Frame<'input> {
-    locals: HashMap<&'input str, i32>,
+struct ScopeGuard<'comp, 'input, W: Write>(&'comp mut Compiler<'input, W>);
+
+impl<'input, W: Write> Deref for ScopeGuard<'_, 'input, W> {
+    type Target = Compiler<'input, W>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
 }
 
-impl<'input> Frame<'input> {
-    fn new(func: &Func<'_, 'input>) -> Self {
-        Self {
-            locals: func
-                .body
-                .iter()
-                .filter_map(|stmt| {
-                    if let Stmt::Decl(decl) = stmt {
-                        Some(decl.ident)
-                    } else {
-                        None
-                    }
-                })
-                .scan(0, |offset, name| {
-                    let local = (name, *offset);
-                    *offset -= 8;
-                    Some(local)
-                })
-                .collect(),
-        }
+impl<W: Write> DerefMut for ScopeGuard<'_, '_, W> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
     }
+}
 
-    fn size(&self) -> usize {
-        self.locals.len() * 4
-    }
-
-    fn get(&self, name: &str) -> Option<i32> {
-        self.locals.get(name).copied()
+impl<W: Write> Drop for ScopeGuard<'_, '_, W> {
+    fn drop(&mut self) {
+        self.0.scopes.pop();
     }
 }
 

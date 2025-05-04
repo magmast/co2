@@ -1,46 +1,40 @@
 use bumpalo::{Bump, collections::Vec, vec};
 use unicode_ident::{is_xid_continue, is_xid_start};
 use winnow::{
-    Parser, Result,
+    ModalResult, Parser, Result,
     ascii::{digit1, hex_digit1, multispace0, oct_digit1},
-    combinator::{alt, delimited, fail, opt, preceded, repeat, terminated},
-    error::{ContextError, ParserError, StrContext, StrContextValue},
+    combinator::{
+        alt, cut_err, delimited, fail, opt, preceded, repeat, separated_pair, terminated,
+    },
+    error::{ContextError, ErrMode, ParserError, StrContext, StrContextValue},
     stream::{AsChar, Compare, Stream, StreamIsPartial},
     token::{any, one_of, take_while},
 };
 
-use crate::ast::{Decl, Expr, Func, Int, IntRadix, IntSuffix, Param, Stmt, Type};
+use crate::ast::{Assign, Decl, Expr, Func, If, Int, IntRadix, IntSuffix, Param, Stmt, Type};
 
 pub fn file<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Vec<'bump, Func<'bump, 'input>>, ContextError> {
-    repeat(.., func(bump)).fold(
-        || Vec::new_in(bump),
-        |mut acc, func| {
-            acc.push(func);
-            acc
-        },
-    )
+) -> impl Parser<&'input str, Vec<'bump, Func<'bump, 'input>>, ErrMode<ContextError>> {
+    repeat(.., func(bump))
+        .fold(
+            || Vec::new_in(bump),
+            |mut acc, func| {
+                acc.push(func);
+                acc
+            },
+        )
+        .context(StrContext::Label("file"))
 }
 
 fn func<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Func<'bump, 'input>, ContextError> {
+) -> impl Parser<&'input str, Func<'bump, 'input>, ErrMode<ContextError>> {
     (
         ty,
         ident,
         delimited(token('('), params(bump), token(')')),
-        delimited(
-            token('{'),
-            repeat(.., stmt(bump)).fold(
-                || Vec::new_in(bump),
-                |mut acc, stmt| {
-                    acc.push(stmt);
-                    acc
-                },
-            ),
-            token('}'),
-        ),
+        block(bump),
     )
         .map(|(r#type, ident, params, body)| Func {
             ty: r#type,
@@ -48,15 +42,18 @@ fn func<'bump, 'input: 'bump>(
             params,
             body,
         })
+        .context(StrContext::Label("function"))
 }
 
-fn ty(input: &mut &str) -> Result<Type> {
-    token(alt(("void".value(Type::Void), "int".value(Type::Int)))).parse_next(input)
+fn ty(input: &mut &str) -> ModalResult<Type> {
+    token(alt(("void".value(Type::Void), "int".value(Type::Int))))
+        .context(StrContext::Label("type"))
+        .parse_next(input)
 }
 
 fn params<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Vec<'bump, Param<'input>>, ContextError> {
+) -> impl Parser<&'input str, Vec<'bump, Param<'input>>, ErrMode<ContextError>> {
     move |input: &mut &'input str| {
         let init = opt(param).parse_next(input)?;
         if let Some(init) = init {
@@ -75,28 +72,65 @@ fn params<'bump, 'input: 'bump>(
     }
 }
 
-fn param<'input>(input: &mut &'input str) -> Result<Param<'input>> {
+fn param<'input>(input: &mut &'input str) -> ModalResult<Param<'input>> {
     (ty, opt(ident))
         .map(|(r#type, ident)| Param { ty: r#type, ident })
         .parse_next(input)
 }
 
+fn block<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Vec<'bump, Stmt<'bump, 'input>>, ErrMode<ContextError>> {
+    delimited(
+        token('{'),
+        repeat(.., stmt(bump)).fold(
+            || Vec::new_in(bump),
+            |mut acc, stmt| {
+                acc.push(stmt);
+                acc
+            },
+        ),
+        token('}'),
+    )
+}
+
 fn stmt<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Stmt<'bump, 'input>, ContextError> {
-    terminated(
+) -> impl Parser<&'input str, Stmt<'bump, 'input>, ErrMode<ContextError>> {
+    StmtParser { bump }
+}
+
+struct StmtParser<'bump> {
+    bump: &'bump Bump,
+}
+
+impl<'bump, 'input> Parser<&'input str, Stmt<'bump, 'input>, ErrMode<ContextError>>
+    for StmtParser<'bump>
+{
+    fn parse_next(
+        &mut self,
+        input: &mut &'input str,
+    ) -> Result<Stmt<'bump, 'input>, ErrMode<ContextError>> {
         alt((
-            preceded(token("return"), expr(bump)).map(Stmt::Return),
-            decl(bump).map(Stmt::Decl),
-            expr(bump).map(Stmt::Expr),
-        )),
-        token(';'),
-    )
+            r#if(self.bump).map(Stmt::If),
+            terminated(
+                alt((
+                    preceded(token("return"), expr(self.bump)).map(Stmt::Return),
+                    decl(self.bump).map(Stmt::Decl),
+                    expr(self.bump).map(Stmt::Expr),
+                )),
+                cut_err(token(';'))
+                    .context(StrContext::Label("statement termination"))
+                    .context(StrContext::Expected(StrContextValue::CharLiteral(';'))),
+            ),
+        ))
+        .parse_next(input)
+    }
 }
 
 fn decl<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Decl<'bump, 'input>, ContextError> {
+) -> impl Parser<&'input str, Decl<'bump, 'input>, ErrMode<ContextError>> {
     (ty, ident, opt(preceded(token('='), expr(bump)))).map(|(ty, ident, init)| Decl {
         ty,
         ident,
@@ -104,9 +138,45 @@ fn decl<'bump, 'input: 'bump>(
     })
 }
 
+fn r#if<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, If<'bump, 'input>, ErrMode<ContextError>> {
+    preceded(
+        token("if"),
+        cut_err((
+            delimited(token('('), cut_err(expr(bump)), token(')')),
+            block_or_stmt(bump).context(StrContext::Label("if body")),
+            opt(preceded(
+                token("else"),
+                cut_err(block_or_stmt(bump)).context(StrContext::Label("else body")),
+            )),
+        )),
+    )
+    .map(|(cond, body, r#else)| If {
+        cond,
+        then: body,
+        r#else,
+    })
+}
+
+fn block_or_stmt<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Vec<'bump, Stmt<'bump, 'input>>, ErrMode<ContextError>> {
+    alt((
+        block(bump),
+        stmt(bump).map(|stmt| vec![in bump; stmt]),
+        fail.context(StrContext::Expected(StrContextValue::StringLiteral(
+            "block",
+        )))
+        .context(StrContext::Expected(StrContextValue::StringLiteral(
+            "statement",
+        ))),
+    ))
+}
+
 fn expr<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
     ExprParser { bump }
 }
 
@@ -115,17 +185,31 @@ struct ExprParser<'bump> {
     bump: &'bump Bump,
 }
 
-impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ContextError> for ExprParser<'bump> {
-    fn parse_next(&mut self, input: &mut &'input str) -> Result<Expr<'bump, 'input>, ContextError> {
-        additive(self.bump)
-            .context(StrContext::Label("expression"))
-            .parse_next(input)
+impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>>
+    for ExprParser<'bump>
+{
+    fn parse_next(
+        &mut self,
+        input: &mut &'input str,
+    ) -> Result<Expr<'bump, 'input>, ErrMode<ContextError>> {
+        alt((
+            assign(self.bump).map(|assign| Expr::Assign(self.bump.alloc(assign))),
+            additive(self.bump),
+        ))
+        .context(StrContext::Label("expression"))
+        .parse_next(input)
     }
+}
+
+fn assign<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Assign<'bump, 'input>, ErrMode<ContextError>> {
+    separated_pair(ident, token('='), expr(bump)).map(|(ident, value)| Assign { ident, value })
 }
 
 fn additive<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
     move |input: &mut &'input str| {
         let init = multiplicative(bump).parse_next(input)?;
 
@@ -153,7 +237,7 @@ fn additive<'bump, 'input: 'bump>(
 
 fn multiplicative<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
     move |input: &mut &'input str| {
         let init = unary(bump).parse_next(input)?;
 
@@ -172,7 +256,7 @@ fn multiplicative<'bump, 'input: 'bump>(
 
 fn unary<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
     UnaryParser { bump }
 }
 
@@ -180,8 +264,13 @@ struct UnaryParser<'bump> {
     bump: &'bump Bump,
 }
 
-impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ContextError> for UnaryParser<'bump> {
-    fn parse_next(&mut self, input: &mut &'input str) -> Result<Expr<'bump, 'input>, ContextError> {
+impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>>
+    for UnaryParser<'bump>
+{
+    fn parse_next(
+        &mut self,
+        input: &mut &'input str,
+    ) -> Result<Expr<'bump, 'input>, ErrMode<ContextError>> {
         alt((
             preceded(token('-'), unary(self.bump)).map(|expr| Expr::Neg(self.bump.alloc(expr))),
             preceded(token('+'), unary(self.bump)).map(|expr| Expr::Pos(self.bump.alloc(expr))),
@@ -193,7 +282,7 @@ impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ContextError> for U
 
 fn primary<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
     alt((
         group(bump),
         int.map(Expr::Int),
@@ -204,7 +293,7 @@ fn primary<'bump, 'input: 'bump>(
 
 fn group<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Expr<'bump, 'input>, ContextError> {
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
     delimited(
         token('(')
             .context(StrContext::Label("group delimiter"))
@@ -216,7 +305,7 @@ fn group<'bump, 'input: 'bump>(
     )
 }
 
-fn ident<'input>(input: &mut &'input str) -> Result<&'input str> {
+fn ident<'input>(input: &mut &'input str) -> ModalResult<&'input str> {
     token(
         (
             any.verify(|&c: &char| is_xid_start(c)),
@@ -227,7 +316,7 @@ fn ident<'input>(input: &mut &'input str) -> Result<&'input str> {
     .parse_next(input)
 }
 
-fn int<'input>(input: &mut &'input str) -> Result<Int<'input>> {
+fn int<'input>(input: &mut &'input str) -> ModalResult<Int<'input>> {
     token((int_radix, opt(int_suffix)))
         .map(|((radix, value), suffix)| Int {
             radix,
@@ -237,7 +326,7 @@ fn int<'input>(input: &mut &'input str) -> Result<Int<'input>> {
         .parse_next(input)
 }
 
-fn int_radix<'input>(input: &mut &'input str) -> Result<(IntRadix, &'input str)> {
+fn int_radix<'input>(input: &mut &'input str) -> ModalResult<(IntRadix, &'input str)> {
     alt((
         bin_int_radix.map(|v| (IntRadix::Bin, v)),
         hex_int_radix.map(|v| (IntRadix::Hex, v)),
@@ -247,23 +336,23 @@ fn int_radix<'input>(input: &mut &'input str) -> Result<(IntRadix, &'input str)>
     .parse_next(input)
 }
 
-fn bin_int_radix<'input>(input: &mut &'input str) -> Result<&'input str> {
+fn bin_int_radix<'input>(input: &mut &'input str) -> ModalResult<&'input str> {
     base_int_radix((alt(("0b", "0B")), one_of(b"01")), one_of(b"01"))
         .map(|v: &'input str| &v[2..])
         .parse_next(input)
 }
 
-fn oct_int_radix<'input>(input: &mut &'input str) -> Result<&'input str> {
+fn oct_int_radix<'input>(input: &mut &'input str) -> ModalResult<&'input str> {
     base_int_radix('0', oct_digit1).parse_next(input)
 }
 
-fn dec_int_radix<'input>(input: &mut &'input str) -> Result<&'input str> {
+fn dec_int_radix<'input>(input: &mut &'input str) -> ModalResult<&'input str> {
     base_int_radix(one_of(b"123456789"), digit1)
         .take()
         .parse_next(input)
 }
 
-fn hex_int_radix<'input>(input: &mut &'input str) -> Result<&'input str> {
+fn hex_int_radix<'input>(input: &mut &'input str) -> ModalResult<&'input str> {
     base_int_radix(
         (alt(("0x", "0X")), any.verify(|c: &char| c.is_hex_digit())),
         hex_digit1,
@@ -284,7 +373,7 @@ where
     (prefix, repeat::<_, _, (), _, _>(.., (opt('\''), digit))).take()
 }
 
-fn int_suffix(input: &mut &str) -> Result<IntSuffix> {
+fn int_suffix(input: &mut &str) -> ModalResult<IntSuffix> {
     let inner = || {
         alt((
             alt(("ll", "LL")).value(IntSuffix::LongLong),

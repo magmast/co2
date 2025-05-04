@@ -34,6 +34,7 @@ pub struct Param<'input> {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Stmt<'bump, 'input> {
     Decl(Decl<'bump, 'input>),
+    If(If<'bump, 'input>),
     Expr(Expr<'bump, 'input>),
     Return(Expr<'bump, 'input>),
 }
@@ -46,15 +47,23 @@ pub struct Decl<'bump, 'input> {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct If<'bump, 'input> {
+    pub cond: Expr<'bump, 'input>,
+    pub then: Vec<'bump, Stmt<'bump, 'input>>,
+    pub r#else: Option<Vec<'bump, Stmt<'bump, 'input>>>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expr<'bump, 'input> {
     Ident(&'input str),
     Int(Int<'input>),
-    Add(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
-    Sub(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
-    Mul(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
-    Div(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Neg(&'bump Expr<'bump, 'input>),
     Pos(&'bump Expr<'bump, 'input>),
+    Mul(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Div(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Add(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Sub(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Assign(&'bump Assign<'bump, 'input>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -113,4 +122,10 @@ impl IntSuffix {
             _ => self.clone(),
         }
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Assign<'bump, 'input> {
+    pub ident: &'input str,
+    pub value: Expr<'bump, 'input>,
 }
