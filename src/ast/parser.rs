@@ -13,9 +13,11 @@ use winnow::{
 
 use crate::ast::{Assign, Decl, Expr, Func, If, Int, IntRadix, IntSuffix, Param, Stmt, Type};
 
+use super::File;
+
 pub fn file<'bump, 'input: 'bump>(
     bump: &'bump Bump,
-) -> impl Parser<&'input str, Vec<'bump, Func<'bump, 'input>>, ErrMode<ContextError>> {
+) -> impl Parser<&'input str, File<'bump, 'input>, ErrMode<ContextError>> {
     repeat(.., func(bump))
         .fold(
             || Vec::new_in(bump),
@@ -24,6 +26,7 @@ pub fn file<'bump, 'input: 'bump>(
                 acc
             },
         )
+        .map(|funcs| File { funcs })
         .context(StrContext::Label("file"))
 }
 
@@ -408,7 +411,7 @@ mod tests {
     mod int_radix {
         use winnow::Parser;
 
-        use crate::{ast::IntRadix, parser::int_radix};
+        use crate::ast::{IntRadix, parser::int_radix};
 
         #[test]
         fn parses_all_radixes() {
@@ -428,7 +431,7 @@ mod tests {
     mod bin_int {
         use winnow::Parser;
 
-        use crate::parser::bin_int_radix;
+        use crate::ast::parser::bin_int_radix;
 
         #[test]
         fn valid() {
@@ -450,7 +453,7 @@ mod tests {
     mod oct_int {
         use winnow::Parser;
 
-        use crate::parser::oct_int_radix;
+        use crate::ast::parser::oct_int_radix;
 
         #[test]
         fn valid() {
@@ -472,7 +475,7 @@ mod tests {
     mod dec_int {
         use winnow::Parser;
 
-        use crate::parser::dec_int_radix;
+        use crate::ast::parser::dec_int_radix;
 
         #[test]
         fn valid() {
@@ -494,7 +497,7 @@ mod tests {
     mod hex_int {
         use winnow::Parser;
 
-        use crate::parser::hex_int_radix;
+        use crate::ast::parser::hex_int_radix;
 
         #[test]
         fn valid() {

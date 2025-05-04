@@ -1,14 +1,17 @@
 use core::str;
-use std::{fs::File, io::BufWriter, os::unix::fs::PermissionsExt};
+use std::{
+    fs::{self},
+    io::BufWriter,
+    os::unix::fs::PermissionsExt,
+};
 
 use anyhow::{Context, Result, anyhow};
 use bumpalo::Bump;
 use co2::{
+    ast::File,
     comp::Compiler,
     elf::{Elf, Segment, SegmentFlags},
-    parser,
 };
-use winnow::Parser;
 
 const CODE: &str = "
 int main() {
@@ -29,10 +32,10 @@ fn main() -> Result<()> {
     {
         let bump = Bump::new();
 
-        let func = parser::file(&bump)
-            .parse(CODE)
+        let func = File::parse(&bump, CODE)
             .map_err(|err| anyhow!("{err}"))
             .context("Parsing failed")?
+            .funcs
             .into_iter()
             .next()
             .context("No functions are defined")?;
@@ -52,7 +55,7 @@ fn main() -> Result<()> {
         ])
         .build()?;
 
-    let f = File::create("a.out").context("Failed to create file for the program")?;
+    let f = fs::File::create("a.out").context("Failed to create file for the program")?;
     f.metadata()?.permissions().set_mode(0o755);
     let mut f = BufWriter::new(f);
     elf.write(&mut f)?;

@@ -1,6 +1,26 @@
 use std::fmt::{self, Display, Formatter};
 
-use bumpalo::collections::Vec;
+use bumpalo::{Bump, collections::Vec};
+use winnow::{
+    Parser,
+    error::{ContextError, ParseError},
+};
+
+mod parser;
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct File<'bump, 'input> {
+    pub funcs: Vec<'bump, Func<'bump, 'input>>,
+}
+
+impl<'bump, 'input> File<'bump, 'input> {
+    pub fn parse(
+        bump: &'bump Bump,
+        code: &'input str,
+    ) -> Result<Self, ParseError<&'input str, ContextError>> {
+        parser::file(bump).parse(code)
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Func<'bump, 'input> {
