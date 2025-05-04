@@ -12,8 +12,8 @@ use winnow::Parser;
 
 const CODE: &str = "
 int main() {
-    int a = 4;
-    return a / 2;
+    int a = -4;
+    return a / 2 * -1;
 }
 ";
 
