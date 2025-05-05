@@ -1,49 +1,84 @@
 use std::{
     collections::HashMap,
-    io, mem,
+    io,
     ops::{Deref, DerefMut},
 };
 
 use iced_x86::{
-    IcedError, Instruction,
-    code_asm::{CodeAssembler, rax, rbp, rbx, rdi, rdx, rsp},
+    IcedError,
+    code_asm::{CodeAssembler, CodeLabel, al, rax, rbp, rbx, rdi, rdx, rsp},
 };
 
-use crate::ast::{Assign, Decl, Expr, Func, If, Int, Stmt};
+use crate::ast::{Assign, Call, Decl, Expr, File, Func, If, Int, Stmt, Type};
 
 pub struct Compiler<'input> {
     asm: CodeAssembler,
     scopes: Vec<HashMap<&'input str, i32>>,
     offset: i32,
+    funcs: HashMap<&'input str, CodeLabel>,
+    epilogue: CodeLabel,
+    main: CodeLabel,
 }
 
 impl<'input> Compiler<'input> {
-    pub fn compile(&mut self, base_addr: u64, func: &Func<'_, 'input>) -> Result<Vec<u8>, Error> {
-        self.func(func)?;
+    pub fn compile(&mut self, base_addr: u64, file: &File<'_, 'input>) -> Result<Vec<u8>, Error> {
+        self.asm.call(self.main)?;
         self.asm.mov(rdi, rax)?;
         self.asm.mov(rax, 60i64)?;
         self.asm.syscall()?;
+        for func in &file.funcs {
+            self.func(func)?;
+        }
         Ok(self.asm.assemble(base_addr)?)
     }
 
     fn func(&mut self, func: &Func<'_, 'input>) -> Result<(), Error> {
-        self.offset = 0;
+        if func.ty != Type::Int {
+            todo!();
+        }
 
-        let body_instrs = self.buf(|c| c.block(&func.body))?;
+        self.epilogue = self.asm.create_label();
+        self.prepare_scopes(func);
+
+        let prologue = if func.ident == "main" {
+            self.asm.set_label(&mut self.main)?;
+            self.main
+        } else {
+            let mut label = self.asm.create_label();
+            self.asm.set_label(&mut label)?;
+            label
+        };
+
+        self.funcs.insert(func.ident, prologue);
 
         self.asm.push(rbp)?;
         self.asm.mov(rbp, rsp)?;
-
-        let frame_size = -self.offset;
+        let frame_size = Self::compute_frame_size(&func.body) as i32;
         self.asm.sub(rsp, frame_size)?;
-        for instr in body_instrs {
-            self.asm.add_instruction(instr)?;
-        }
 
+        self.block(&func.body)?;
+
+        self.asm.set_label(&mut self.epilogue)?;
         self.asm.mov(rsp, rbp)?;
         self.asm.pop(rbp)?;
+        self.asm.ret()?;
 
         Ok(())
+    }
+
+    fn prepare_scopes(&mut self, func: &Func<'_, 'input>) {
+        self.offset = 0;
+        self.scopes.clear();
+        let mut params_scope = HashMap::new();
+        for (i, param) in func.params.iter().enumerate() {
+            if param.ty != Type::Int {
+                todo!();
+            }
+            if let Some(ident) = param.ident {
+                params_scope.insert(ident, (i as i32 + 2) * 8);
+            }
+        }
+        self.scopes.push(params_scope);
     }
 
     fn block(&mut self, block: &[Stmt<'_, 'input>]) -> Result<(), Error> {
@@ -56,22 +91,28 @@ impl<'input> Compiler<'input> {
 
     fn stmt(&mut self, stmt: &Stmt<'_, 'input>) -> Result<(), Error> {
         match stmt {
+            Stmt::Return(expr) => self.ret(expr),
             Stmt::Decl(decl) => self.decl(decl),
             Stmt::If(r#if) => self.r#if(r#if),
             Stmt::Expr(expr) => self.expr(expr),
-            Stmt::Return(expr) => self.expr(expr),
         }
+    }
+
+    fn ret(&mut self, expr: &Expr) -> Result<(), Error> {
+        self.expr(expr)?;
+        self.asm.jmp(self.epilogue)?;
+        Ok(())
     }
 
     fn decl(&mut self, decl: &Decl<'_, 'input>) -> Result<(), Error> {
         if let Some(init) = &decl.init {
             self.expr(init)?;
+            self.offset -= 8;
             self.asm.mov(rbp + self.offset, rax)?;
             self.scopes
                 .last_mut()
                 .unwrap()
                 .insert(decl.ident, self.offset);
-            self.offset -= 8;
         }
         Ok(())
     }
@@ -106,12 +147,13 @@ impl<'input> Compiler<'input> {
         match expr {
             Expr::Int(int) => self.int(int),
             Expr::Ident(ident) => self.ident(ident),
-            Expr::Call(_) => todo!(),
+            Expr::Call(call) => self.call(call),
             Expr::Assign(assign) => self.assign(assign),
             Expr::Add(lhs, rhs) => self.add(lhs, rhs),
             Expr::Sub(lhs, rhs) => self.sub(lhs, rhs),
             Expr::Mul(lhs, rhs) => self.mul(lhs, rhs),
             Expr::Div(lhs, rhs) => self.div(lhs, rhs),
+            Expr::Eq(lhs, rhs) => self.eq(lhs, rhs),
             Expr::Pos(expr) => self.expr(expr),
             Expr::Neg(expr) => self.neg(expr),
         }
@@ -125,6 +167,24 @@ impl<'input> Compiler<'input> {
     fn ident(&mut self, ident: &str) -> Result<(), Error> {
         let offset = self.get(ident)?;
         self.asm.mov(rax, rbp + offset)?;
+        Ok(())
+    }
+
+    fn call(&mut self, call: &Call) -> Result<(), Error> {
+        let label = self
+            .funcs
+            .get(call.ident)
+            .ok_or(Error::Undeclared)
+            .copied()?;
+
+        let params_size = call.params.len() as i32 * 8;
+        for param in call.params.iter().rev() {
+            self.expr(param)?;
+            self.asm.push(rax)?;
+        }
+        self.asm.call(label)?;
+        self.asm.add(rsp, params_size)?;
+
         Ok(())
     }
 
@@ -174,25 +234,21 @@ impl<'input> Compiler<'input> {
         Ok(())
     }
 
+    fn eq(&mut self, lhs: &Expr, rhs: &Expr) -> Result<(), Error> {
+        self.expr(lhs)?;
+        self.asm.push(rax)?;
+        self.expr(rhs)?;
+        self.asm.pop(rbx)?;
+        self.asm.cmp(rax, rbx)?;
+        self.asm.sete(al)?;
+        self.asm.movzx(rax, al)?;
+        Ok(())
+    }
+
     fn neg(&mut self, expr: &Expr) -> Result<(), Error> {
         self.expr(expr)?;
         self.asm.neg(rax)?;
         Ok(())
-    }
-
-    fn buf(
-        &mut self,
-        f: impl FnOnce(&mut Compiler<'input>) -> Result<(), Error>,
-    ) -> Result<Vec<Instruction>, Error> {
-        let mut child = Compiler {
-            asm: CodeAssembler::new(64)?,
-            offset: self.offset,
-            scopes: mem::take(&mut self.scopes),
-        };
-        let result = f(&mut child);
-        self.scopes = child.scopes;
-        self.offset = child.offset;
-        result.and(Ok(child.asm.take_instructions()))
     }
 
     fn enter(&mut self) -> ScopeGuard<'_, 'input> {
@@ -208,14 +264,35 @@ impl<'input> Compiler<'input> {
             .copied()
             .ok_or(Error::Undeclared)
     }
+
+    fn compute_frame_size(block: &[Stmt]) -> usize {
+        block
+            .iter()
+            .map(|stmt| match stmt {
+                Stmt::Decl(_) => 8,
+                Stmt::If(r#if) => {
+                    let then_size = Self::compute_frame_size(&r#if.then);
+                    r#if.r#else
+                        .as_ref()
+                        .map(|r#else| then_size + Self::compute_frame_size(r#else))
+                        .unwrap_or(then_size)
+                }
+                _ => 0,
+            })
+            .sum()
+    }
 }
 
 impl Default for Compiler<'_> {
     fn default() -> Self {
+        let mut asm = CodeAssembler::new(64).unwrap();
         Self {
-            asm: CodeAssembler::new(64).unwrap(),
             offset: 0,
             scopes: vec![HashMap::new()],
+            funcs: HashMap::new(),
+            epilogue: asm.create_label(),
+            main: asm.create_label(),
+            asm,
         }
     }
 }

@@ -145,6 +145,7 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
             Expr::Div(lhs, rhs) => {
                 (self.eval_expr(lhs)? / self.eval_expr(rhs)?).map(|value| &*self.bump.alloc(value))
             }
+            Expr::Eq(_, _) => todo!(),
             Expr::Neg(expr) => self
                 .eval_expr(expr)
                 .and_then(|result| -result)

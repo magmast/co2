@@ -197,7 +197,7 @@ impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextErro
     ) -> Result<Expr<'bump, 'input>, ErrMode<ContextError>> {
         alt((
             assign(self.bump).map(|assign| Expr::Assign(self.bump.alloc(assign))),
-            additive(self.bump),
+            equality(self.bump),
         ))
         .context(StrContext::Label("expression"))
         .parse_next(input)
@@ -210,6 +210,21 @@ fn assign<'bump, 'input: 'bump>(
     separated_pair(ident, token('='), expr(bump)).map(|(ident, value)| Assign { ident, value })
 }
 
+fn equality<'bump, 'input: 'bump>(
+    bump: &'bump Bump,
+) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
+    move |input: &mut &'input str| {
+        let init = additive(bump).parse_next(input)?;
+
+        repeat(.., preceded(token("=="), additive(bump)))
+            .fold(
+                || init.clone(),
+                |lhs, rhs| Expr::Eq(bump.alloc(lhs), bump.alloc(rhs)),
+            )
+            .parse_next(input)
+    }
+}
+
 fn additive<'bump, 'input: 'bump>(
     bump: &'bump Bump,
 ) -> impl Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextError>> {
@@ -217,7 +232,7 @@ fn additive<'bump, 'input: 'bump>(
         let init = multiplicative(bump).parse_next(input)?;
 
         repeat(
-            0..,
+            ..,
             (
                 token(one_of(b"+-"))
                     .context(StrContext::Label("operator"))

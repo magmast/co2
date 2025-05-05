@@ -84,6 +84,7 @@ pub enum Expr<'bump, 'input> {
     Div(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Add(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Sub(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Eq(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Assign(&'bump Assign<'bump, 'input>),
 }
 

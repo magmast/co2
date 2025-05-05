@@ -14,15 +14,20 @@ use co2::{
 };
 
 const CODE: &str = "
-int main() {
-    int ret = 0;
-    if (0) ret = 1;
-    else if (1) {
-        int a = 2;
-        ret = a * 4 / 2;
+int fib(int i) {
+    if (i == 0) {
+        return 1;
     }
-    else ret = 3;
-    return ret;
+    if (i == 1) {
+        return 1;
+    }
+    int left = fib(i - 2);
+    int right = fib(i - 1);
+    return left + right;
+}
+
+int main() {
+    return fib(10);
 }
 ";
 
@@ -30,16 +35,12 @@ fn main() -> Result<()> {
     let code = {
         let bump = Bump::new();
 
-        let func = File::parse(&bump, CODE)
+        let file = File::parse(&bump, CODE)
             .map_err(|err| anyhow!("{err}"))
-            .context("Parsing failed")?
-            .funcs
-            .into_iter()
-            .next()
-            .context("No functions are defined")?;
+            .context("Parsing failed")?;
 
         Compiler::default()
-            .compile(elf::BASE_ADDR, &func)
+            .compile(elf::BASE_ADDR, &file)
             .context("Compilation failed")?
     };
 
