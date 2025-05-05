@@ -10,16 +10,16 @@ use bumpalo::Bump;
 use co2::{
     ast::File,
     comp::Compiler,
-    elf::{Elf, Segment, SegmentFlags},
+    elf::{self, Elf, Segment, SegmentFlags},
 };
 
 const CODE: &str = "
 int main() {
     int ret = 0;
     if (0) ret = 1;
-    else if (0) {
+    else if (1) {
         int a = 2;
-        ret = a;
+        ret = a * 4 / 2;
     }
     else ret = 3;
     return ret;
@@ -27,9 +27,7 @@ int main() {
 ";
 
 fn main() -> Result<()> {
-    let mut code = vec![];
-
-    {
+    let code = {
         let bump = Bump::new();
 
         let func = File::parse(&bump, CODE)
@@ -40,9 +38,9 @@ fn main() -> Result<()> {
             .next()
             .context("No functions are defined")?;
 
-        Compiler::from(&mut code)
-            .compile(&func)
-            .context("Compilation failed")?;
+        Compiler::default()
+            .compile(elf::BASE_ADDR, &func)
+            .context("Compilation failed")?
     };
 
     let elf = Elf::builder()

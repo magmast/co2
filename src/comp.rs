@@ -1,41 +1,47 @@
 use std::{
     collections::HashMap,
-    io::{self, Write},
-    mem,
+    io, mem,
     ops::{Deref, DerefMut},
 };
 
-use crate::{
-    ast::{Assign, Decl, Expr, Func, If, Int, Stmt},
-    x64::{Encoder, M32, M64, Reg},
+use iced_x86::{
+    IcedError, Instruction,
+    code_asm::{CodeAssembler, rax, rbp, rbx, rdi, rdx, rsp},
 };
 
-pub struct Compiler<'input, W: Write> {
-    enc: Encoder<W>,
+use crate::ast::{Assign, Decl, Expr, Func, If, Int, Stmt};
+
+pub struct Compiler<'input> {
+    asm: CodeAssembler,
     scopes: Vec<HashMap<&'input str, i32>>,
     offset: i32,
 }
 
-impl<'input, W: Write> Compiler<'input, W> {
-    pub fn compile(&mut self, func: &Func<'_, 'input>) -> Result<(), Error> {
+impl<'input> Compiler<'input> {
+    pub fn compile(&mut self, base_addr: u64, func: &Func<'_, 'input>) -> Result<Vec<u8>, Error> {
         self.func(func)?;
-        self.enc.movsxd::<M64>(Reg::Di, Reg::Ax)?;
-        self.enc.mov::<M64>(Reg::Ax, 60i32)?;
-        self.enc.sys_call()?;
-        Ok(())
+        self.asm.mov(rdi, rax)?;
+        self.asm.mov(rax, 60i64)?;
+        self.asm.syscall()?;
+        Ok(self.asm.assemble(base_addr)?)
     }
 
     fn func(&mut self, func: &Func<'_, 'input>) -> Result<(), Error> {
         self.offset = 0;
-        let body_bytes = self.buf(|c| c.block(&func.body))?;
-        let frame_size = -self.offset;
 
-        self.enc.push::<M64>(Reg::Bp)?;
-        self.enc.mov::<M64>(Reg::Bp, Reg::Sp)?;
-        self.enc.sub::<M64>(Reg::Sp, frame_size)?;
-        self.enc.write_all(&body_bytes)?;
-        self.enc.mov::<M64>(Reg::Sp, Reg::Bp)?;
-        self.enc.pop::<M64>(Reg::Bp)?;
+        let body_instrs = self.buf(|c| c.block(&func.body))?;
+
+        self.asm.push(rbp)?;
+        self.asm.mov(rbp, rsp)?;
+
+        let frame_size = -self.offset;
+        self.asm.sub(rsp, frame_size)?;
+        for instr in body_instrs {
+            self.asm.add_instruction(instr)?;
+        }
+
+        self.asm.mov(rsp, rbp)?;
+        self.asm.pop(rbp)?;
 
         Ok(())
     }
@@ -60,38 +66,39 @@ impl<'input, W: Write> Compiler<'input, W> {
     fn decl(&mut self, decl: &Decl<'_, 'input>) -> Result<(), Error> {
         if let Some(init) = &decl.init {
             self.expr(init)?;
-            self.enc.mov::<M32>((Reg::Bp, self.offset), Reg::Ax)?;
+            self.asm.mov(rbp + self.offset, rax)?;
             self.scopes
                 .last_mut()
                 .unwrap()
                 .insert(decl.ident, self.offset);
-            self.offset -= 4;
+            self.offset -= 8;
         }
         Ok(())
     }
 
     fn r#if(&mut self, r#if: &If<'_, 'input>) -> Result<(), Error> {
-        let else_bytes = r#if
-            .r#else
-            .as_ref()
-            .map(|block| self.buf(|c| c.block(block)))
-            .transpose()?;
-
-        let then_bytes = self.buf(|c| {
-            c.block(&r#if.then)?;
-            if let Some(else_bytes) = &else_bytes {
-                c.enc.jmp(else_bytes.len() as i32)?;
-            }
-            Ok(())
-        })?;
+        let mut end_label = self.asm.create_label();
 
         self.expr(&r#if.cond)?;
-        self.enc.cmp(0)?;
-        self.enc.jz(then_bytes.len() as i32)?;
-        self.enc.write_all(&then_bytes)?;
-        if let Some(else_bytes) = else_bytes {
-            self.enc.write_all(&else_bytes)?;
+        self.asm.cmp(rax, 0)?;
+
+        if let Some(else_body) = r#if.r#else.as_ref() {
+            let mut else_label = self.asm.create_label();
+            self.asm.jz(else_label)?;
+
+            self.block(&r#if.then)?;
+            self.asm.jmp(end_label)?;
+
+            self.asm.set_label(&mut else_label)?;
+            self.block(else_body)?;
+        } else {
+            self.asm.jz(end_label)?;
+            self.block(&r#if.then)?;
         }
+
+        self.asm.set_label(&mut end_label)?;
+        self.asm.nop()?;
+
         Ok(())
     }
 
@@ -111,83 +118,84 @@ impl<'input, W: Write> Compiler<'input, W> {
     }
 
     fn int(&mut self, int: &Int) -> Result<(), Error> {
-        self.enc.mov::<M32>(Reg::Ax, int.to_i32())?;
+        self.asm.mov(rax, int.to_i64())?;
         Ok(())
     }
 
     fn ident(&mut self, ident: &str) -> Result<(), Error> {
         let offset = self.get(ident)?;
-        self.enc.mov::<M32>(Reg::Ax, (Reg::Bp, offset))?;
+        self.asm.mov(rax, rbp + offset)?;
         Ok(())
     }
 
     fn assign(&mut self, assign: &Assign) -> Result<(), Error> {
         self.expr(&assign.value)?;
         let offset = self.get(assign.ident)?;
-        self.enc.mov::<M32>((Reg::Bp, offset), Reg::Ax)?;
+        self.asm.mov(rbp + offset, rax)?;
         Ok(())
     }
 
     fn add(&mut self, lhs: &Expr, rhs: &Expr) -> Result<(), Error> {
         self.expr(lhs)?;
-        self.enc.push::<M32>(Reg::Ax)?;
+        self.asm.push(rax)?;
         self.expr(rhs)?;
-        self.enc.pop::<M32>(Reg::Bx)?;
-        self.enc.add::<M32>(Reg::Ax, Reg::Bx)?;
+        self.asm.pop(rbx)?;
+        self.asm.add(rax, rbx)?;
         Ok(())
     }
 
     fn sub(&mut self, lhs: &Expr, rhs: &Expr) -> Result<(), Error> {
         self.expr(lhs)?;
-        self.enc.push::<M32>(Reg::Ax)?;
+        self.asm.push(rax)?;
         self.expr(rhs)?;
-        self.enc.mov::<M32>(Reg::Bx, Reg::Ax)?;
-        self.enc.pop::<M32>(Reg::Ax)?;
-        self.enc.sub::<M32>(Reg::Ax, Reg::Bx)?;
+        self.asm.mov(rbx, rax)?;
+        self.asm.pop(rax)?;
+        self.asm.sub(rax, rbx)?;
         Ok(())
     }
 
     fn mul(&mut self, lhs: &Expr, rhs: &Expr) -> Result<(), Error> {
         self.expr(lhs)?;
-        self.enc.push::<M32>(Reg::Ax)?;
+        self.asm.push(rax)?;
         self.expr(rhs)?;
-        self.enc.pop::<M32>(Reg::Bx)?;
-        self.enc.imul::<M32>(Reg::Bx)?;
+        self.asm.pop(rbx)?;
+        self.asm.imul(rbx)?;
         Ok(())
     }
 
     fn div(&mut self, lhs: &Expr, rhs: &Expr) -> Result<(), Error> {
         self.expr(lhs)?;
-        self.enc.push::<M32>(Reg::Ax)?;
+        self.asm.push(rax)?;
         self.expr(rhs)?;
-        self.enc.mov::<M32>(Reg::Bx, Reg::Ax)?;
-        self.enc.pop::<M32>(Reg::Ax)?;
-        self.enc.mov::<M32>(Reg::Dx, 0)?;
-        self.enc.idiv::<M32>(Reg::Bx)?;
+        self.asm.mov(rbx, rax)?;
+        self.asm.pop(rax)?;
+        self.asm.mov(rdx, 0i64)?;
+        self.asm.idiv(rbx)?;
         Ok(())
     }
 
     fn neg(&mut self, expr: &Expr) -> Result<(), Error> {
         self.expr(expr)?;
-        self.enc.neg::<M32>(Reg::Ax)?;
+        self.asm.neg(rax)?;
         Ok(())
     }
 
     fn buf(
         &mut self,
-        f: impl FnOnce(&mut Compiler<'input, &mut Vec<u8>>) -> Result<(), Error>,
-    ) -> Result<Vec<u8>, Error> {
-        let mut buf = vec![];
-        let mut child = Compiler::from(&mut buf);
-        child.scopes = mem::take(&mut self.scopes);
-        child.offset = self.offset;
+        f: impl FnOnce(&mut Compiler<'input>) -> Result<(), Error>,
+    ) -> Result<Vec<Instruction>, Error> {
+        let mut child = Compiler {
+            asm: CodeAssembler::new(64)?,
+            offset: self.offset,
+            scopes: mem::take(&mut self.scopes),
+        };
         let result = f(&mut child);
         self.scopes = child.scopes;
         self.offset = child.offset;
-        result.and(Ok(buf))
+        result.and(Ok(child.asm.take_instructions()))
     }
 
-    fn enter(&mut self) -> ScopeGuard<'_, 'input, W> {
+    fn enter(&mut self) -> ScopeGuard<'_, 'input> {
         self.scopes.push(HashMap::new());
         ScopeGuard(self)
     }
@@ -202,33 +210,33 @@ impl<'input, W: Write> Compiler<'input, W> {
     }
 }
 
-impl<W: Write> From<W> for Compiler<'_, W> {
-    fn from(value: W) -> Self {
+impl Default for Compiler<'_> {
+    fn default() -> Self {
         Self {
-            enc: Encoder::from(value),
+            asm: CodeAssembler::new(64).unwrap(),
             offset: 0,
             scopes: vec![HashMap::new()],
         }
     }
 }
 
-struct ScopeGuard<'comp, 'input, W: Write>(&'comp mut Compiler<'input, W>);
+struct ScopeGuard<'comp, 'input>(&'comp mut Compiler<'input>);
 
-impl<'input, W: Write> Deref for ScopeGuard<'_, 'input, W> {
-    type Target = Compiler<'input, W>;
+impl<'input> Deref for ScopeGuard<'_, 'input> {
+    type Target = Compiler<'input>;
 
     fn deref(&self) -> &Self::Target {
         self.0
     }
 }
 
-impl<W: Write> DerefMut for ScopeGuard<'_, '_, W> {
+impl DerefMut for ScopeGuard<'_, '_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
     }
 }
 
-impl<W: Write> Drop for ScopeGuard<'_, '_, W> {
+impl Drop for ScopeGuard<'_, '_> {
     fn drop(&mut self) {
         self.0.scopes.pop();
     }
@@ -238,6 +246,8 @@ impl<W: Write> Drop for ScopeGuard<'_, '_, W> {
 pub enum Error {
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    Iced(#[from] IcedError),
     #[error("Use of undeclared variable")]
     Undeclared,
 }

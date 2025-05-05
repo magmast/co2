@@ -99,6 +99,10 @@ impl Int<'_> {
         i32::from_str_radix(self.value, self.radix.into()).unwrap()
     }
 
+    pub fn to_i64(&self) -> i64 {
+        i64::from_str_radix(self.value, self.radix.into()).unwrap()
+    }
+
     pub fn to_u64(&self) -> u64 {
         u64::from_str_radix(self.value, self.radix.into()).unwrap()
     }

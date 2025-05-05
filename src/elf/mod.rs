@@ -16,6 +16,8 @@ pub const MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
 const SHSTRTAB_NAME: &str = ".shstrtab";
 
+pub const BASE_ADDR: u64 = 0x0040_0000;
+
 fn align_up(addr: u64, align: u64) -> u64 {
     (addr + align - 1) & !(align - 1)
 }
@@ -226,8 +228,8 @@ impl<'data> Elf<'data> {
                     (mem::size_of::<Header>()
                         + mem::size_of::<ProgramHeader>() * self.segments.len())
                         as u64,
-                    0x0040_0000,
-                    0x0040_0000,
+                    BASE_ADDR,
+                    BASE_ADDR,
                 ),
                 |(pfend, pvoff, ppoff), s| {
                     let filesz = s.data.len() as u64;
