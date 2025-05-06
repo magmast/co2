@@ -263,12 +263,13 @@ fn multiplicative<'bump, 'input: 'bump>(
     move |input: &mut &'input str| {
         let init = unary(bump).parse_next(input)?;
 
-        repeat(0.., (token(one_of(b"*/")), unary(bump)))
+        repeat(0.., (token(one_of(b"*/%")), unary(bump)))
             .fold(
                 || init.clone(),
                 |lhs, (op, rhs)| match op {
                     '*' => Expr::Mul(bump.alloc(lhs), bump.alloc(rhs)),
                     '/' => Expr::Div(bump.alloc(lhs), bump.alloc(rhs)),
+                    '%' => Expr::Mod(bump.alloc(lhs), bump.alloc(rhs)),
                     _ => unreachable!(),
                 },
             )

@@ -294,12 +294,33 @@ impl<'input> Compiler<'input> {
         to: AsmRegister64,
     ) -> Result<(), Error> {
         let mut lock = self.lock(rax)?;
+        let mut lock = lock.lock(rdx)?;
         lock.expr(rax, lhs)?;
         let rhs_reg = lock.any_reg();
         lock.expr(rhs_reg, rhs)?;
         lock.asm.idiv(rhs_reg)?;
         if to != rax {
             lock.asm.mov(to, rax)?;
+        }
+        Ok(())
+    }
+
+    #[builder]
+    fn r#mod(
+        &mut self,
+        #[builder(finish_fn)] lhs: &Expr<'_, 'input>,
+        #[builder(finish_fn)] rhs: &Expr<'_, 'input>,
+        to: AsmRegister64,
+    ) -> Result<(), Error> {
+        let mut lock = self.lock(rax)?;
+        let mut lock = lock.lock(rdx)?;
+        lock.expr(rax, lhs)?;
+        lock.asm.cqo()?;
+        let rhs_reg = lock.any_reg();
+        lock.expr(rhs_reg, rhs)?;
+        lock.asm.idiv(rhs_reg)?;
+        if to != rdx {
+            lock.asm.mov(to, rdx)?;
         }
         Ok(())
     }
@@ -504,6 +525,7 @@ impl<'ident> CompilerExpr<'ident, AsmRegister64> for Compiler<'ident> {
             Expr::Sub(lhs, rhs) => self.sub().to(to).call(lhs, rhs),
             Expr::Mul(lhs, rhs) => self.mul().to(to).call(lhs, rhs),
             Expr::Div(lhs, rhs) => self.div().to(to).call(lhs, rhs),
+            Expr::Mod(lhs, rhs) => self.r#mod().to(to).call(lhs, rhs),
             Expr::Eq(lhs, rhs) => {
                 self.cmp(lhs, rhs)?;
                 self.invert_zf = true;
@@ -570,6 +592,11 @@ impl<'ident> CompilerExpr<'ident, Zf> for Compiler<'ident> {
             }
             Expr::Div(lhs, rhs) => {
                 self.div().to(reg).call(lhs, rhs)?;
+                self.reg_to_zf(reg)?;
+                Ok(())
+            }
+            Expr::Mod(lhs, rhs) => {
+                self.r#mod().to(reg).call(lhs, rhs)?;
                 self.reg_to_zf(reg)?;
                 Ok(())
             }

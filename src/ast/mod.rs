@@ -83,6 +83,7 @@ pub enum Expr<'bump, 'input> {
     Not(&'bump Expr<'bump, 'input>),
     Mul(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Div(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Mod(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Add(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Sub(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Eq(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
