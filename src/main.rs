@@ -15,7 +15,7 @@ use co2::{
 
 const CODE: &str = "
 int fib(int i) {
-    if (i == 0) {
+    if (!i) {
         return 1;
     }
     if (i == 1) {

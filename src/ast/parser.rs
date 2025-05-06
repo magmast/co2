@@ -216,10 +216,14 @@ fn equality<'bump, 'input: 'bump>(
     move |input: &mut &'input str| {
         let init = additive(bump).parse_next(input)?;
 
-        repeat(.., preceded(token("=="), additive(bump)))
+        repeat(.., (token(alt(("==", "!="))), additive(bump)))
             .fold(
                 || init.clone(),
-                |lhs, rhs| Expr::Eq(bump.alloc(lhs), bump.alloc(rhs)),
+                |lhs, (op, rhs)| match op {
+                    "==" => Expr::Eq(bump.alloc(lhs), bump.alloc(rhs)),
+                    "!=" => Expr::Ne(bump.alloc(lhs), bump.alloc(rhs)),
+                    _ => unreachable!(),
+                },
             )
             .parse_next(input)
     }
@@ -292,6 +296,10 @@ impl<'bump, 'input> Parser<&'input str, Expr<'bump, 'input>, ErrMode<ContextErro
         alt((
             preceded(token('-'), unary(self.bump)).map(|expr| Expr::Neg(self.bump.alloc(expr))),
             preceded(token('+'), unary(self.bump)).map(|expr| Expr::Pos(self.bump.alloc(expr))),
+            preceded(
+                token('!'),
+                unary(self.bump).map(|expr| Expr::Not(self.bump.alloc(expr))),
+            ),
             primary(self.bump),
         ))
         .parse_next(input)

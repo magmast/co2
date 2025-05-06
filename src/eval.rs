@@ -146,11 +146,13 @@ impl<'bump, 'ast, 'input> Scope<'bump, 'ast, 'input> {
                 (self.eval_expr(lhs)? / self.eval_expr(rhs)?).map(|value| &*self.bump.alloc(value))
             }
             Expr::Eq(_, _) => todo!(),
+            Expr::Ne(_, _) => todo!(),
             Expr::Neg(expr) => self
                 .eval_expr(expr)
                 .and_then(|result| -result)
                 .map(|value| &*self.bump.alloc(value)),
             Expr::Pos(expr) => self.eval_expr(expr),
+            Expr::Not(_) => todo!(),
         }
     }
 

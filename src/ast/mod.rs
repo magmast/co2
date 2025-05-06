@@ -80,11 +80,13 @@ pub enum Expr<'bump, 'input> {
     Call(Call<'bump, 'input>),
     Neg(&'bump Expr<'bump, 'input>),
     Pos(&'bump Expr<'bump, 'input>),
+    Not(&'bump Expr<'bump, 'input>),
     Mul(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Div(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Add(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Sub(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Eq(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
+    Ne(&'bump Expr<'bump, 'input>, &'bump Expr<'bump, 'input>),
     Assign(&'bump Assign<'bump, 'input>),
 }
 

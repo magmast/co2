@@ -154,6 +154,8 @@ impl<'input> Compiler<'input> {
             Expr::Mul(lhs, rhs) => self.mul(lhs, rhs),
             Expr::Div(lhs, rhs) => self.div(lhs, rhs),
             Expr::Eq(lhs, rhs) => self.eq(lhs, rhs),
+            Expr::Ne(lhs, rhs) => self.ne(lhs, rhs),
+            Expr::Not(expr) => self.not(expr),
             Expr::Pos(expr) => self.expr(expr),
             Expr::Neg(expr) => self.neg(expr),
         }
@@ -240,6 +242,25 @@ impl<'input> Compiler<'input> {
         self.expr(rhs)?;
         self.asm.pop(rbx)?;
         self.asm.cmp(rax, rbx)?;
+        self.asm.sete(al)?;
+        self.asm.movzx(rax, al)?;
+        Ok(())
+    }
+
+    fn ne(&mut self, lhs: &Expr, rhs: &Expr) -> Result<(), Error> {
+        self.expr(lhs)?;
+        self.asm.push(rax)?;
+        self.expr(rhs)?;
+        self.asm.pop(rbx)?;
+        self.asm.cmp(rax, rbx)?;
+        self.asm.setne(al)?;
+        self.asm.movzx(rax, al)?;
+        Ok(())
+    }
+
+    fn not(&mut self, expr: &Expr) -> Result<(), Error> {
+        self.expr(expr)?;
+        self.asm.cmp(rax, 0)?;
         self.asm.sete(al)?;
         self.asm.movzx(rax, al)?;
         Ok(())
