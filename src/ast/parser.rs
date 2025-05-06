@@ -48,12 +48,6 @@ fn func<'bump, 'input: 'bump>(
         .context(StrContext::Label("function"))
 }
 
-fn ty(input: &mut &str) -> ModalResult<Type> {
-    token(alt(("void".value(Type::Void), "int".value(Type::Int))))
-        .context(StrContext::Label("type"))
-        .parse_next(input)
-}
-
 fn params<'bump, 'input: 'bump>(
     bump: &'bump Bump,
 ) -> impl Parser<&'input str, Vec<'bump, Param<'input>>, ErrMode<ContextError>> {
@@ -78,6 +72,12 @@ fn params<'bump, 'input: 'bump>(
 fn param<'input>(input: &mut &'input str) -> ModalResult<Param<'input>> {
     (ty, opt(ident))
         .map(|(r#type, ident)| Param { ty: r#type, ident })
+        .parse_next(input)
+}
+
+fn ty(input: &mut &str) -> ModalResult<Type> {
+    token(alt(("void".value(Type::Void), "int".value(Type::Int))))
+        .context(StrContext::Label("type"))
         .parse_next(input)
 }
 

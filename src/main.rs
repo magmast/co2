@@ -26,7 +26,7 @@ int fib(int i) {
     return left + right;
 }
 
-int main() {
+int main(void) {
     return fib(10);
 }
 ";

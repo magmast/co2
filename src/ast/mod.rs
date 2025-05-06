@@ -90,6 +90,25 @@ pub enum Expr<'bump, 'input> {
     Assign(&'bump Assign<'bump, 'input>),
 }
 
+impl Expr<'_, '_> {
+    /// Computes the expression to i64 if possible.
+    pub fn to_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int(int) => Some(int.to_i64()),
+            Self::Neg(expr) => Some(-expr.to_i64()?),
+            Self::Pos(expr) => expr.to_i64(),
+            Self::Not(expr) => Some(if expr.to_i64()? == 0 { 1 } else { 0 }),
+            Self::Mul(lhs, rhs) => Some(lhs.to_i64()? * rhs.to_i64()?),
+            Self::Div(lhs, rhs) => Some(lhs.to_i64()? / rhs.to_i64()?),
+            Self::Add(lhs, rhs) => Some(lhs.to_i64()? + rhs.to_i64()?),
+            Self::Sub(lhs, rhs) => Some(lhs.to_i64()? - rhs.to_i64()?),
+            Self::Eq(lhs, rhs) => Some(if lhs.to_i64()? == rhs.to_i64()? { 0 } else { 1 }),
+            Self::Ne(lhs, rhs) => Some(if lhs.to_i64()? != rhs.to_i64()? { 1 } else { 0 }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Int<'input> {
     pub radix: IntRadix,
