@@ -128,12 +128,16 @@ impl<'input> Compiler<'input> {
     }
 
     fn decl(&mut self, decl: &Decl<'_, 'input>) -> Result<()> {
+        self.offset -= 8;
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(decl.ident, self.offset);
+
         if let Some(init) = &decl.init {
             self.reg(None, |c, reg| {
                 c.expr(reg, init)?;
-                c.offset -= 8;
                 c.asm.mov(rbp + c.offset, reg)?;
-                c.scopes.last_mut().unwrap().insert(decl.ident, c.offset);
                 Ok(())
             })?;
         }
