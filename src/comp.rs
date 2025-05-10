@@ -110,11 +110,12 @@ impl<'input> Compiler<'input> {
     }
 
     fn block(&mut self, block: &[Stmt<'_, 'input>]) -> Result<(), Error> {
-        let mut scope = self.enter();
-        for stmt in block {
-            scope.stmt(stmt)?;
-        }
-        Ok(())
+        self.scope(|c| {
+            for stmt in block {
+                c.stmt(stmt)?;
+            }
+            Ok(())
+        })
     }
 
     fn stmt(&mut self, stmt: &Stmt<'_, 'input>) -> Result<(), Error> {
@@ -325,13 +326,20 @@ impl<'input> Compiler<'input> {
         Ok(())
     }
 
-    fn cmp(&mut self, lhs: &Expr<'_, 'input>, rhs: &Expr<'_, 'input>) -> Result<(), Error> {
+    fn eq(&mut self, lhs: &Expr<'_, 'input>, rhs: &Expr<'_, 'input>) -> Result<(), Error> {
         let lhs_reg = self.any_reg();
         self.expr(lhs_reg, lhs)?;
         let mut lock = self.lock(lhs_reg)?;
         let rhs_reg = lock.any_reg();
         lock.expr(rhs_reg, rhs)?;
         lock.asm.cmp(lhs_reg, rhs_reg)?;
+        lock.invert_zf = false;
+        Ok(())
+    }
+
+    fn ne(&mut self, lhs: &Expr<'_, 'input>, rhs: &Expr<'_, 'input>) -> Result<(), Error> {
+        self.eq(lhs, rhs)?;
+        self.invert_zf = !self.invert_zf;
         Ok(())
     }
 
@@ -364,9 +372,9 @@ impl<'input> Compiler<'input> {
     fn zf_to_reg(&mut self, reg: AsmRegister64) -> Result<(), Error> {
         let lb = reg.to_low_byte();
         if self.invert_zf {
-            self.asm.sete(lb)?;
-        } else {
             self.asm.setne(lb)?;
+        } else {
+            self.asm.sete(lb)?;
         }
         self.asm.movzx(reg, lb)?;
         Ok(())
@@ -378,9 +386,11 @@ impl<'input> Compiler<'input> {
         Ok(())
     }
 
-    fn enter(&mut self) -> ScopeGuard<'_, 'input> {
+    fn scope<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, Error>) -> Result<T, Error> {
         self.scopes.push(HashMap::new());
-        ScopeGuard(self)
+        let result = f(self);
+        self.scopes.pop();
+        result
     }
 
     fn get(&self, ident: &str) -> Result<i32, Error> {
@@ -435,28 +445,6 @@ impl Default for Compiler<'_> {
             regs: vec![rbp],
             invert_zf: true,
         }
-    }
-}
-
-struct ScopeGuard<'comp, 'input>(&'comp mut Compiler<'input>);
-
-impl<'input> Deref for ScopeGuard<'_, 'input> {
-    type Target = Compiler<'input>;
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl DerefMut for ScopeGuard<'_, '_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0
-    }
-}
-
-impl Drop for ScopeGuard<'_, '_> {
-    fn drop(&mut self) {
-        self.0.scopes.pop();
     }
 }
 
@@ -527,14 +515,12 @@ impl<'ident> CompilerExpr<'ident, AsmRegister64> for Compiler<'ident> {
             Expr::Div(lhs, rhs) => self.div().to(to).call(lhs, rhs),
             Expr::Mod(lhs, rhs) => self.r#mod().to(to).call(lhs, rhs),
             Expr::Eq(lhs, rhs) => {
-                self.cmp(lhs, rhs)?;
-                self.invert_zf = true;
+                self.eq(lhs, rhs)?;
                 self.zf_to_reg(to)?;
                 Ok(())
             }
             Expr::Ne(lhs, rhs) => {
-                self.cmp(lhs, rhs)?;
-                self.invert_zf = false;
+                self.ne(lhs, rhs)?;
                 self.zf_to_reg(to)?;
                 Ok(())
             }
@@ -601,13 +587,11 @@ impl<'ident> CompilerExpr<'ident, Zf> for Compiler<'ident> {
                 Ok(())
             }
             Expr::Eq(lhs, rhs) => {
-                self.cmp(lhs, rhs)?;
-                self.invert_zf = false;
+                self.eq(lhs, rhs)?;
                 Ok(())
             }
             Expr::Ne(lhs, rhs) => {
-                self.cmp(lhs, rhs)?;
-                self.invert_zf = true;
+                self.ne(lhs, rhs)?;
                 Ok(())
             }
             Expr::Not(expr) => self.not(expr),

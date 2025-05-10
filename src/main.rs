@@ -1,4 +1,3 @@
-use core::str;
 use std::{
     fs::{self},
     io::BufWriter,
