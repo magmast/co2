@@ -1,10 +1,5 @@
-use std::{
-    collections::HashMap,
-    io,
-    ops::{Deref, DerefMut},
-};
+use std::{collections::HashMap, io};
 
-use bon::bon;
 use iced_x86::{
     IcedError,
     code_asm::{
@@ -20,23 +15,26 @@ const RETURN_REG: AsmRegister64 = rax;
 
 pub struct Compiler<'input> {
     asm: CodeAssembler,
+
+    /// Labels for defined functions.
+    funcs: HashMap<&'input str, CodeLabel>,
+
     /// Scopes visible in the current code block.
     scopes: Vec<HashMap<&'input str, i32>>,
     /// An offset from the RBP register of a previous variable.
     offset: i32,
-    /// Labels for defined functions.
-    funcs: HashMap<&'input str, CodeLabel>,
     /// Label to the current function epilogue.
     epilogue: CodeLabel,
-    /// Currently used registers.
-    regs: Vec<AsmRegister64>,
+
     /// Toggles zf flag meaning.
     invert_zf: bool,
+
+    lru: [AsmRegister64; 12],
+    used_regs: Vec<AsmRegister64>,
 }
 
-#[bon]
 impl<'input> Compiler<'input> {
-    pub fn compile(&mut self, base_addr: u64, file: &File<'_, 'input>) -> Result<Vec<u8>, Error> {
+    pub fn compile(&mut self, base_addr: u64, file: &File<'_, 'input>) -> Result<Vec<u8>> {
         let main = self
             .funcs
             .get("main")
@@ -51,7 +49,7 @@ impl<'input> Compiler<'input> {
         Ok(self.asm.assemble(base_addr)?)
     }
 
-    fn func(&mut self, func: &Func<'_, 'input>) -> Result<(), Error> {
+    fn func(&mut self, func: &Func<'_, 'input>) -> Result<()> {
         self.epilogue = self.asm.create_label();
         self.prepare_scopes(func)?;
 
@@ -63,18 +61,19 @@ impl<'input> Compiler<'input> {
         self.asm.set_label(prologue)?;
 
         {
-            let mut lock = self.lock(rbp)?;
-            lock.asm.mov(rbp, rsp)?;
+            self.asm.push(rbp)?;
+            self.asm.mov(rbp, rsp)?;
 
             let frame_size = Self::compute_frame_size(&func.body) as i32;
             if frame_size != 0 {
-                lock.asm.sub(rsp, frame_size)?;
+                self.asm.sub(rsp, frame_size)?;
             }
 
-            lock.block(&func.body)?;
+            self.block(&func.body)?;
 
-            lock.set_epilogue()?;
-            lock.asm.mov(rsp, rbp)?;
+            self.asm.set_label(&mut self.epilogue)?;
+            self.asm.mov(rsp, rbp)?;
+            self.asm.pop(rbp)?;
         }
 
         self.asm.ret()?;
@@ -82,7 +81,7 @@ impl<'input> Compiler<'input> {
         Ok(())
     }
 
-    fn prepare_scopes(&mut self, func: &Func<'_, 'input>) -> Result<(), Error> {
+    fn prepare_scopes(&mut self, func: &Func<'_, 'input>) -> Result<()> {
         self.offset = 0;
         self.scopes.clear();
         let mut params_scope = HashMap::new();
@@ -104,12 +103,7 @@ impl<'input> Compiler<'input> {
         Ok(())
     }
 
-    fn set_epilogue(&mut self) -> Result<(), Error> {
-        self.asm.set_label(&mut self.epilogue)?;
-        Ok(())
-    }
-
-    fn block(&mut self, block: &[Stmt<'_, 'input>]) -> Result<(), Error> {
+    fn block(&mut self, block: &[Stmt<'_, 'input>]) -> Result<()> {
         self.scope(|c| {
             for stmt in block {
                 c.stmt(stmt)?;
@@ -118,36 +112,35 @@ impl<'input> Compiler<'input> {
         })
     }
 
-    fn stmt(&mut self, stmt: &Stmt<'_, 'input>) -> Result<(), Error> {
+    fn stmt(&mut self, stmt: &Stmt<'_, 'input>) -> Result<()> {
         match stmt {
             Stmt::Return(expr) => self.ret(expr),
             Stmt::Decl(decl) => self.decl(decl),
             Stmt::If(r#if) => self.r#if(r#if),
-            Stmt::Expr(expr) => self.expr(self.any_reg(), expr),
+            Stmt::Expr(expr) => self.reg(None, |c, reg| c.expr(reg, expr)),
         }
     }
 
-    fn ret(&mut self, expr: &Expr<'_, 'input>) -> Result<(), Error> {
+    fn ret(&mut self, expr: &Expr<'_, 'input>) -> Result<()> {
         self.expr(RETURN_REG, expr)?;
         self.asm.jmp(self.epilogue)?;
         Ok(())
     }
 
-    fn decl(&mut self, decl: &Decl<'_, 'input>) -> Result<(), Error> {
+    fn decl(&mut self, decl: &Decl<'_, 'input>) -> Result<()> {
         if let Some(init) = &decl.init {
-            let reg = self.any_reg();
-            self.expr(reg, init)?;
-            self.offset -= 8;
-            self.asm.mov(rbp + self.offset, reg)?;
-            self.scopes
-                .last_mut()
-                .unwrap()
-                .insert(decl.ident, self.offset);
+            self.reg(None, |c, reg| {
+                c.expr(reg, init)?;
+                c.offset -= 8;
+                c.asm.mov(rbp + c.offset, reg)?;
+                c.scopes.last_mut().unwrap().insert(decl.ident, c.offset);
+                Ok(())
+            })?;
         }
         Ok(())
     }
 
-    fn r#if(&mut self, r#if: &If<'_, 'input>) -> Result<(), Error> {
+    fn r#if(&mut self, r#if: &If<'_, 'input>) -> Result<()> {
         let mut end_label = self.asm.create_label();
 
         self.expr(Zf, &r#if.cond)?;
@@ -172,195 +165,203 @@ impl<'input> Compiler<'input> {
         Ok(())
     }
 
-    #[builder]
-    fn int(
-        &mut self,
-        #[builder(finish_fn)] int: &Int<'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
-        self.asm.mov(to, int.to_i64())?;
+    fn int(&mut self, dst: AsmRegister64, int: &Int<'input>) -> Result<()> {
+        self.asm.mov(dst, int.to_i64())?;
         Ok(())
     }
 
-    #[builder]
-    fn ident(&mut self, #[builder(finish_fn)] ident: &str, to: AsmRegister64) -> Result<(), Error> {
-        let offset = self.get(ident)?;
-        self.asm.mov(to, rbp + offset)?;
+    fn ident(&mut self, dst: AsmRegister64, ident: &str) -> Result<()> {
+        let offset = self.offset_of(ident)?;
+        self.asm.mov(dst, rbp + offset)?;
         Ok(())
     }
 
-    #[builder]
-    fn call(
-        &mut self,
-        #[builder(finish_fn)] call: &Call<'_, 'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
+    fn call(&mut self, dst: AsmRegister64, call: &Call<'_, 'input>) -> Result<()> {
         let label = self
             .funcs
             .get(call.ident)
             .ok_or(Error::Undeclared)
             .copied()?;
 
-        let param_reg = self.any_reg();
         let params_size = call.params.len() as i32 * 8;
-        for param in call.params.iter().rev() {
-            self.expr(param_reg, param)?;
-            self.asm.push(param_reg)?;
-        }
+        self.reg(None, |c, reg| {
+            for param in call.params.iter().rev() {
+                c.expr(reg, param)?;
+                c.asm.push(reg)?;
+            }
 
-        if to == RETURN_REG {
-            self.asm.call(label)?;
-        } else {
-            let mut lock = self.lock(RETURN_REG)?;
-            lock.asm.call(label)?;
-            lock.asm.mov(to, RETURN_REG)?;
-        }
+            if dst == RETURN_REG {
+                c.asm.call(label)?;
+            } else {
+                c.reg(Some(RETURN_REG), |c, reg| {
+                    c.asm.call(label)?;
+                    c.asm.mov(dst, reg)?;
+                    Ok(())
+                })?;
+            }
 
-        self.asm.add(rsp, params_size)?;
+            c.asm.add(rsp, params_size)?;
 
+            Ok(())
+        })
+    }
+
+    fn assign(&mut self, dst: AsmRegister64, assign: &Assign<'_, 'input>) -> Result<()> {
+        self.expr(dst, &assign.value)?;
+        let offset = self.offset_of(assign.ident)?;
+        self.asm.mov(rbp + offset, dst)?;
         Ok(())
     }
 
-    #[builder]
-    fn assign(
-        &mut self,
-        #[builder(finish_fn)] assign: &Assign<'_, 'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
-        self.expr(to, &assign.value)?;
-        let offset = self.get(assign.ident)?;
-        self.asm.mov(rbp + offset, to)?;
-        Ok(())
-    }
-
-    #[builder]
     fn add(
         &mut self,
-        #[builder(finish_fn)] lhs: &Expr<'_, 'input>,
-        #[builder(finish_fn)] rhs: &Expr<'_, 'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
-        self.expr(to, lhs)?;
-        let rhs = {
-            let mut lock = self.lock(to)?;
-            let rhs_reg = lock.any_reg();
-            lock.expr(rhs_reg, rhs)?;
-            rhs_reg
-        };
-        self.asm.add(to, rhs)?;
-        Ok(())
+        dst: AsmRegister64,
+        lhs: &Expr<'_, 'input>,
+        rhs: &Expr<'_, 'input>,
+    ) -> Result<()> {
+        self.expr(dst, lhs)?;
+        self.reg(None, |c, src| {
+            c.expr(src, rhs)?;
+            c.asm.add(dst, src)?;
+            Ok(())
+        })
     }
 
-    #[builder]
     fn sub(
         &mut self,
-        #[builder(finish_fn)] lhs: &Expr<'_, 'input>,
-        #[builder(finish_fn)] rhs: &Expr<'_, 'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
-        self.expr(to, lhs)?;
-        let rhs = {
-            let mut lock = self.lock(to)?;
-            let rhs_reg = lock.any_reg();
-            lock.expr(rhs_reg, rhs)?;
-            rhs_reg
-        };
-        self.asm.sub(to, rhs)?;
-        Ok(())
+        dst: AsmRegister64,
+        lhs: &Expr<'_, 'input>,
+        rhs: &Expr<'_, 'input>,
+    ) -> Result<()> {
+        self.expr(dst, lhs)?;
+        self.reg(None, |c, src| {
+            c.expr(src, rhs)?;
+            c.asm.sub(dst, src)?;
+            Ok(())
+        })
     }
 
-    #[builder]
     fn mul(
         &mut self,
-        #[builder(finish_fn)] lhs: &Expr<'_, 'input>,
-        #[builder(finish_fn)] rhs: &Expr<'_, 'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
-        self.expr(to, lhs)?;
-        let rhs = {
-            let mut lock = self.lock(to)?;
-            let rhs_reg = lock.any_reg();
-            lock.expr(rhs_reg, rhs)?;
-            rhs_reg
-        };
-        self.asm.imul_2(to, rhs)?;
-        Ok(())
+        dst: AsmRegister64,
+        lhs: &Expr<'_, 'input>,
+        rhs: &Expr<'_, 'input>,
+    ) -> Result<()> {
+        self.expr(dst, lhs)?;
+        self.reg(None, |c, src| {
+            c.expr(src, rhs)?;
+            c.asm.imul_2(dst, src)?;
+            Ok(())
+        })
     }
 
-    #[builder]
     fn div(
         &mut self,
-        #[builder(finish_fn)] lhs: &Expr<'_, 'input>,
-        #[builder(finish_fn)] rhs: &Expr<'_, 'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
-        let mut lock = self.lock(rax)?;
-        let mut lock = lock.lock(rdx)?;
-        lock.expr(rax, lhs)?;
-        let rhs_reg = lock.any_reg();
-        lock.expr(rhs_reg, rhs)?;
-        lock.asm.idiv(rhs_reg)?;
-        if to != rax {
-            lock.asm.mov(to, rax)?;
+        dst: AsmRegister64,
+        lhs: &Expr<'_, 'input>,
+        rhs: &Expr<'_, 'input>,
+    ) -> Result<()> {
+        let push_rax = dst != rax && self.used_regs.contains(&rax);
+        if push_rax {
+            self.asm.push(rax)?;
         }
+
+        let push_rdx = dst != rdx && self.used_regs.contains(&rdx);
+        if push_rdx {
+            self.asm.push(rdx)?;
+        }
+
+        self.reg(None, |c, src| {
+            c.expr(rax, lhs)?;
+            c.asm.cqo()?;
+            c.expr(src, rhs)?;
+            c.asm.idiv(src)?;
+            Ok(())
+        })?;
+
+        if push_rax {
+            self.asm.pop(rax)?;
+        }
+
+        if push_rdx {
+            self.asm.pop(rdx)?;
+        }
+
+        if dst != rax {
+            self.asm.mov(dst, rax)?;
+        }
+
         Ok(())
     }
 
-    #[builder]
     fn r#mod(
         &mut self,
-        #[builder(finish_fn)] lhs: &Expr<'_, 'input>,
-        #[builder(finish_fn)] rhs: &Expr<'_, 'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
-        let mut lock = self.lock(rax)?;
-        let mut lock = lock.lock(rdx)?;
-        lock.expr(rax, lhs)?;
-        lock.asm.cqo()?;
-        let rhs_reg = lock.any_reg();
-        lock.expr(rhs_reg, rhs)?;
-        lock.asm.idiv(rhs_reg)?;
-        if to != rdx {
-            lock.asm.mov(to, rdx)?;
+        dst: AsmRegister64,
+        lhs: &Expr<'_, 'input>,
+        rhs: &Expr<'_, 'input>,
+    ) -> Result<()> {
+        let push_rax = dst != rax && self.used_regs.contains(&rax);
+        if push_rax {
+            self.asm.push(rax)?;
         }
+
+        let push_rdx = dst != rdx && self.used_regs.contains(&rdx);
+        if push_rdx {
+            self.asm.push(rdx)?;
+        }
+
+        self.reg(None, |c, src| {
+            c.expr(rax, lhs)?;
+            c.asm.cqo()?;
+            c.expr(src, rhs)?;
+            c.asm.idiv(src)?;
+            Ok(())
+        })?;
+
+        if push_rax {
+            self.asm.pop(rax)?;
+        }
+
+        if push_rdx {
+            self.asm.pop(rdx)?;
+        }
+
+        if dst != rdx {
+            self.asm.mov(dst, rdx)?;
+        }
+
         Ok(())
     }
 
-    fn eq(&mut self, lhs: &Expr<'_, 'input>, rhs: &Expr<'_, 'input>) -> Result<(), Error> {
-        let lhs_reg = self.any_reg();
-        self.expr(lhs_reg, lhs)?;
-        let mut lock = self.lock(lhs_reg)?;
-        let rhs_reg = lock.any_reg();
-        lock.expr(rhs_reg, rhs)?;
-        lock.asm.cmp(lhs_reg, rhs_reg)?;
-        lock.invert_zf = false;
-        Ok(())
+    fn eq(&mut self, lhs: &Expr<'_, 'input>, rhs: &Expr<'_, 'input>) -> Result<()> {
+        self.reg((None, None), |c, (r0, r1)| {
+            c.expr(r0, lhs)?;
+            c.expr(r1, rhs)?;
+            c.asm.cmp(r0, r1)?;
+            c.invert_zf = false;
+            Ok(())
+        })
     }
 
-    fn ne(&mut self, lhs: &Expr<'_, 'input>, rhs: &Expr<'_, 'input>) -> Result<(), Error> {
+    fn ne(&mut self, lhs: &Expr<'_, 'input>, rhs: &Expr<'_, 'input>) -> Result<()> {
         self.eq(lhs, rhs)?;
         self.invert_zf = !self.invert_zf;
         Ok(())
     }
 
-    fn not(&mut self, expr: &Expr<'_, 'input>) -> Result<(), Error> {
+    fn not(&mut self, expr: &Expr<'_, 'input>) -> Result<()> {
         self.expr(Zf, expr)?;
         self.invert_zf = !self.invert_zf;
         Ok(())
     }
 
-    #[builder]
-    fn neg(
-        &mut self,
-        #[builder(finish_fn)] expr: &Expr<'_, 'input>,
-        to: AsmRegister64,
-    ) -> Result<(), Error> {
-        self.expr(to, expr)?;
-        self.asm.neg(to)?;
+    fn neg(&mut self, dst: AsmRegister64, expr: &Expr<'_, 'input>) -> Result<()> {
+        self.expr(dst, expr)?;
+        self.asm.neg(dst)?;
         Ok(())
     }
 
-    fn jmp(&mut self, label: CodeLabel) -> Result<(), Error> {
+    fn jmp(&mut self, label: CodeLabel) -> Result<()> {
         if self.invert_zf {
             self.asm.jz(label)?;
         } else {
@@ -369,7 +370,7 @@ impl<'input> Compiler<'input> {
         Ok(())
     }
 
-    fn zf_to_reg(&mut self, reg: AsmRegister64) -> Result<(), Error> {
+    fn zf_to_reg(&mut self, reg: AsmRegister64) -> Result<()> {
         let lb = reg.to_low_byte();
         if self.invert_zf {
             self.asm.setne(lb)?;
@@ -380,37 +381,26 @@ impl<'input> Compiler<'input> {
         Ok(())
     }
 
-    fn reg_to_zf(&mut self, reg: AsmRegister64) -> Result<(), Error> {
+    fn reg_to_zf(&mut self, reg: AsmRegister64) -> Result<()> {
         self.asm.cmp(reg, 0)?;
         self.invert_zf = true;
         Ok(())
     }
 
-    fn scope<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, Error>) -> Result<T, Error> {
+    fn scope<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.scopes.push(HashMap::new());
         let result = f(self);
         self.scopes.pop();
         result
     }
 
-    fn get(&self, ident: &str) -> Result<i32, Error> {
+    fn offset_of(&self, ident: &str) -> Result<i32> {
         self.scopes
             .iter()
             .rev()
             .find_map(|s| s.get(ident))
             .copied()
             .ok_or(Error::Undeclared)
-    }
-
-    fn lock(&mut self, reg: AsmRegister64) -> Result<RegGuard<'_, 'input>, Error> {
-        RegGuard::new(self, reg)
-    }
-
-    fn any_reg(&self) -> AsmRegister64 {
-        [rax, rbx, rcx, rdx, r8, r9, r10, r11, r12, r13, r14, r15]
-            .into_iter()
-            .find(|reg| !self.regs.contains(reg))
-            .expect("All registers are locked")
     }
 
     fn compute_frame_size(block: &[Stmt]) -> usize {
@@ -434,178 +424,210 @@ impl<'input> Compiler<'input> {
 impl Default for Compiler<'_> {
     fn default() -> Self {
         let mut asm = CodeAssembler::new(64).unwrap();
+
         let mut funcs = HashMap::new();
         funcs.insert("main", asm.create_label());
+
+        let epilogue = asm.create_label();
+
         Self {
+            asm,
+
+            funcs,
+
             offset: 0,
             scopes: vec![HashMap::new()],
-            funcs,
-            epilogue: asm.create_label(),
-            asm,
-            regs: vec![rbp],
+            epilogue,
+
             invert_zf: true,
+
+            lru: [rax, rbx, rcx, rdx, r8, r9, r10, r11, r12, r13, r14, r15],
+            used_regs: vec![],
         }
     }
 }
 
-struct RegGuard<'comp, 'input> {
-    comp: &'comp mut Compiler<'input>,
-    reg: AsmRegister64,
-    pop: bool,
+trait ExprCompiler<'ident, Dst> {
+    fn expr(&mut self, dst: Dst, expr: &Expr<'_, 'ident>) -> Result<()>;
 }
 
-impl<'comp, 'input> RegGuard<'comp, 'input> {
-    fn new(comp: &'comp mut Compiler<'input>, reg: AsmRegister64) -> Result<Self, Error> {
-        let pop = if comp.regs.contains(&reg) {
-            comp.asm.push(reg)?;
-            true
-        } else {
-            comp.regs.push(reg);
-            false
-        };
-
-        Ok(Self { comp, reg, pop })
-    }
-}
-
-impl<'input> Deref for RegGuard<'_, 'input> {
-    type Target = Compiler<'input>;
-
-    fn deref(&self) -> &Self::Target {
-        self.comp
-    }
-}
-
-impl DerefMut for RegGuard<'_, '_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.comp
-    }
-}
-
-impl Drop for RegGuard<'_, '_> {
-    fn drop(&mut self) {
-        if self.pop {
-            self.comp.asm.pop(self.reg).unwrap();
-        } else if let Some((idx, _)) = self
-            .comp
-            .regs
-            .iter()
-            .enumerate()
-            .find(|(_, reg)| self.reg == **reg)
-        {
-            self.comp.regs.remove(idx);
-        }
-    }
-}
-
-trait CompilerExpr<'ident, Dst> {
-    fn expr(&mut self, dst: Dst, expr: &Expr<'_, 'ident>) -> Result<(), Error>;
-}
-
-impl<'ident> CompilerExpr<'ident, AsmRegister64> for Compiler<'ident> {
-    fn expr(&mut self, to: AsmRegister64, expr: &Expr<'_, 'ident>) -> Result<(), Error> {
+impl<'ident> ExprCompiler<'ident, AsmRegister64> for Compiler<'ident> {
+    fn expr(&mut self, dst: AsmRegister64, expr: &Expr<'_, 'ident>) -> Result<()> {
         match expr {
-            Expr::Int(int) => self.int().to(to).call(int),
-            Expr::Ident(ident) => self.ident().to(to).call(ident),
-            Expr::Call(call) => self.call().to(to).call(call),
-            Expr::Assign(assign) => self.assign().to(to).call(assign),
-            Expr::Add(lhs, rhs) => self.add().to(to).call(lhs, rhs),
-            Expr::Sub(lhs, rhs) => self.sub().to(to).call(lhs, rhs),
-            Expr::Mul(lhs, rhs) => self.mul().to(to).call(lhs, rhs),
-            Expr::Div(lhs, rhs) => self.div().to(to).call(lhs, rhs),
-            Expr::Mod(lhs, rhs) => self.r#mod().to(to).call(lhs, rhs),
+            Expr::Int(int) => self.int(dst, int),
+            Expr::Ident(ident) => self.ident(dst, ident),
+            Expr::Call(call) => self.call(dst, call),
+            Expr::Assign(assign) => self.assign(dst, assign),
+            Expr::Add(lhs, rhs) => self.add(dst, lhs, rhs),
+            Expr::Sub(lhs, rhs) => self.sub(dst, lhs, rhs),
+            Expr::Mul(lhs, rhs) => self.mul(dst, lhs, rhs),
+            Expr::Div(lhs, rhs) => self.div(dst, lhs, rhs),
+            Expr::Mod(lhs, rhs) => self.r#mod(dst, lhs, rhs),
             Expr::Eq(lhs, rhs) => {
                 self.eq(lhs, rhs)?;
-                self.zf_to_reg(to)?;
+                self.zf_to_reg(dst)?;
                 Ok(())
             }
             Expr::Ne(lhs, rhs) => {
                 self.ne(lhs, rhs)?;
-                self.zf_to_reg(to)?;
+                self.zf_to_reg(dst)?;
                 Ok(())
             }
             Expr::Not(expr) => {
                 self.not(expr)?;
-                self.zf_to_reg(to)?;
+                self.zf_to_reg(dst)?;
                 Ok(())
             }
-            Expr::Pos(expr) => self.expr(to, expr),
-            Expr::Neg(expr) => self.neg().to(to).call(expr),
+            Expr::Pos(expr) => self.expr(dst, expr),
+            Expr::Neg(expr) => self.neg(dst, expr),
         }
     }
 }
 
-struct Zf;
-
-impl<'ident> CompilerExpr<'ident, Zf> for Compiler<'ident> {
-    fn expr(&mut self, _: Zf, expr: &Expr<'_, 'ident>) -> Result<(), Error> {
-        let reg = self.any_reg();
-        match expr {
+impl<'ident> ExprCompiler<'ident, Zf> for Compiler<'ident> {
+    fn expr(&mut self, _: Zf, expr: &Expr<'_, 'ident>) -> Result<()> {
+        self.reg(None, |c, dst| match expr {
             Expr::Int(int) => {
-                self.int().to(reg).call(int)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.int(dst, int)?;
+                c.reg_to_zf(dst)
             }
             Expr::Ident(ident) => {
-                self.ident().to(reg).call(ident)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.ident(dst, ident)?;
+                c.reg_to_zf(dst)
             }
             Expr::Call(call) => {
-                self.call().to(reg).call(call)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.call(dst, call)?;
+                c.reg_to_zf(dst)
             }
             Expr::Assign(assign) => {
-                self.assign().to(reg).call(assign)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.assign(dst, assign)?;
+                c.reg_to_zf(dst)
             }
             Expr::Add(lhs, rhs) => {
-                self.add().to(reg).call(lhs, rhs)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.add(dst, lhs, rhs)?;
+                c.reg_to_zf(dst)
             }
             Expr::Sub(lhs, rhs) => {
-                self.sub().to(reg).call(lhs, rhs)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.sub(dst, lhs, rhs)?;
+                c.reg_to_zf(dst)
             }
             Expr::Mul(lhs, rhs) => {
-                self.mul().to(reg).call(lhs, rhs)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.mul(dst, lhs, rhs)?;
+                c.reg_to_zf(dst)
             }
             Expr::Div(lhs, rhs) => {
-                self.div().to(reg).call(lhs, rhs)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.div(dst, lhs, rhs)?;
+                c.reg_to_zf(dst)
             }
             Expr::Mod(lhs, rhs) => {
-                self.r#mod().to(reg).call(lhs, rhs)?;
-                self.reg_to_zf(reg)?;
-                Ok(())
+                c.r#mod(dst, lhs, rhs)?;
+                c.reg_to_zf(dst)
             }
-            Expr::Eq(lhs, rhs) => {
-                self.eq(lhs, rhs)?;
-                Ok(())
-            }
-            Expr::Ne(lhs, rhs) => {
-                self.ne(lhs, rhs)?;
-                Ok(())
-            }
-            Expr::Not(expr) => self.not(expr),
+            Expr::Eq(lhs, rhs) => c.eq(lhs, rhs),
+            Expr::Ne(lhs, rhs) => c.ne(lhs, rhs),
+            Expr::Not(expr) => c.not(expr),
             Expr::Pos(expr) => {
-                self.expr(reg, expr)?;
-                self.asm.cmp(reg, 0)?;
-                Ok(())
+                c.expr(dst, expr)?;
+                c.reg_to_zf(dst)
             }
             Expr::Neg(expr) => {
-                self.neg().to(reg).call(expr)?;
-                self.asm.cmp(reg, 0)?;
-                Ok(())
+                c.neg(dst, expr)?;
+                c.reg_to_zf(dst)
             }
+        })
+    }
+}
+
+/// Represents an x86 zero flag.
+///
+/// Used as expression destination for expressions that are used in conditions.
+struct Zf;
+
+trait LockReg<I> {
+    type Reg;
+
+    fn reg<T>(&mut self, reg: I, f: impl FnOnce(&mut Self, Self::Reg) -> Result<T>) -> Result<T>;
+}
+
+impl LockReg<AsmRegister64> for Compiler<'_> {
+    type Reg = AsmRegister64;
+
+    fn reg<T>(
+        &mut self,
+        reg: AsmRegister64,
+        f: impl FnOnce(&mut Self, Self::Reg) -> Result<T>,
+    ) -> Result<T> {
+        let idx = self.lru.iter().position(|&r| r == reg).unwrap();
+        self.lru[idx..].rotate_left(1);
+
+        let already_used = self.used_regs.contains(&reg);
+        if already_used {
+            self.asm.push(reg)?;
+        } else {
+            self.used_regs.push(reg);
         }
+
+        let result = f(self, reg);
+
+        if already_used {
+            self.asm.pop(reg)?;
+        } else if let Some(idx) = self.used_regs.iter().position(|&r| r == reg) {
+            self.used_regs.remove(idx);
+        }
+
+        result
+    }
+}
+
+impl LockReg<Option<AsmRegister64>> for Compiler<'_> {
+    type Reg = AsmRegister64;
+
+    fn reg<TOutput>(
+        &mut self,
+        reg: Option<AsmRegister64>,
+        f: impl FnOnce(&mut Self, Self::Reg) -> Result<TOutput>,
+    ) -> Result<TOutput> {
+        LockReg::<AsmRegister64>::reg(self, reg.unwrap_or_else(|| self.lru[0]), f)
+    }
+}
+
+impl LockReg<(Option<AsmRegister64>, Option<AsmRegister64>)> for Compiler<'_> {
+    type Reg = (AsmRegister64, AsmRegister64);
+
+    fn reg<TOutput>(
+        &mut self,
+        (r0, r1): (Option<AsmRegister64>, Option<AsmRegister64>),
+        f: impl FnOnce(&mut Self, Self::Reg) -> Result<TOutput>,
+    ) -> Result<TOutput> {
+        LockReg::<Option<AsmRegister64>>::reg(self, r0, |c, r0| c.reg(r1, |c, r1| f(c, (r0, r1))))
+    }
+}
+
+impl LockReg<(AsmRegister64, Option<AsmRegister64>)> for Compiler<'_> {
+    type Reg = (AsmRegister64, AsmRegister64);
+
+    fn reg<T>(
+        &mut self,
+        (r0, r1): (AsmRegister64, Option<AsmRegister64>),
+        f: impl FnOnce(&mut Self, Self::Reg) -> Result<T>,
+    ) -> Result<T> {
+        LockReg::<(Option<AsmRegister64>, Option<AsmRegister64>)>::reg(self, (Some(r0), r1), f)
+    }
+}
+
+impl LockReg<(AsmRegister64, AsmRegister64, Option<AsmRegister64>)> for Compiler<'_> {
+    type Reg = (AsmRegister64, AsmRegister64, AsmRegister64);
+
+    fn reg<T>(
+        &mut self,
+        (r0, r1, r2): (AsmRegister64, AsmRegister64, Option<AsmRegister64>),
+        f: impl FnOnce(&mut Self, Self::Reg) -> Result<T>,
+    ) -> Result<T> {
+        LockReg::<(AsmRegister64, Option<AsmRegister64>)>::reg(
+            self,
+            (r0, Some(r1)),
+            |c, (r0, r1)| c.reg(r2, |c, r2| f(c, (r0, r1, r2))),
+        )
     }
 }
 
@@ -633,6 +655,8 @@ impl ToLowByte for AsmRegister64 {
         }
     }
 }
+
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
